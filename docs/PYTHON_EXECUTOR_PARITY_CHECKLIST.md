@@ -1,724 +1,407 @@
-# XXL-JOB Python Executor 对齐清单
+# XXL-JOB Python Executor 最终差异清单
 
-适用目标：
+更新时间：`2026-03-29`
 
-- 保留现有 `xxl-job-admin` 作为调度中心和运维界面
-- 让 Python 执行器对齐官方 Java 执行器的核心协议与关键行为
-- 优先满足“公司爬虫任务接入 XXL-JOB 调度”的落地需求
+这份文档不是“待办列表”，而是当前版本的最终对齐快照。
 
-不在本清单第一阶段范围内的事项：
-
-- 重写 `xxl-job-admin`
-- 在 Python 侧完整复刻 Java 的 GLUE Groovy/脚本编辑体验
-- 做独立于 XXL-JOB 的 URL 级爬虫调度系统
+目标只有一个：直接对照官方 Java executor，判断当前 Python 执行器到底已经对齐到什么程度，还差什么，以及哪些东西根本不应该继续往 executor 里堆。
 
 ---
 
 ## 1. 结论先行
 
-当前仓库里的 Python 实现已经具备“能接 XXL-JOB”的基础能力，但离“可作为公司级 Python 执行器长期使用”还差一层关键行为对齐。
+如果你的目标是：
 
-核心判断：
+- 保留现有 `xxl-job-admin`
+- 把 Python 任务，尤其是公司爬虫任务，统一接入 XXL-JOB 调度
+- 做一个长期可维护的 Python executor
 
-- 方向是对的：就是要复刻 Java 官方执行器
-- 但不能只复刻接口名，还要复刻关键行为
-- 第一阶段应聚焦“官方执行器等价”
-- 第二阶段再叠加“爬虫任务接入友好层”
+那么当前 `pyxxl` 已经可以视为“可用的正式基线”，而不是 demo。
 
-建议执行顺序：
+当前结论：
 
-1. 先做 P0：协议与稳定性对齐
-2. 再做 P1：可运维性和性能
-3. 最后做 P2：面向爬虫业务的接入抽象
+- executor 协议层已经和 Java 官方核心语义基本对齐
+- 运行时层已经补齐了最关键的 block strategy、callback、kill、queue、logId 去重
+- 对典型 Python 任务，尤其 `async` 和 `process` 模式，已经接近“和 Java executor 几乎一样能用”
+- 剩余差异主要集中在执行模型、日志目录结构、callback 批量策略、registry 生命周期细节、GLUE/script 支持
 
-配套学习文档见：
+一句话判断：
 
-- `docs/JAVA_PYTHON_EXECUTOR_COMPARISON_AND_STUDY_GUIDE.md`
+- 现在已经足够接公司爬虫
+- 不需要再去“重写一套 Python admin”
+- 如果还要继续追平 Java，后续投入应放在运维细节和日志/生命周期，而不是协议主链路
 
 ---
 
-## 2. 代码基线
+## 2. 本次对照基线
 
-### 2.1 Java 官方基线
+### 2.1 Java 官方源码
 
-执行器核心参考文件：
+本次差异判断基于直接读取以下官方源码：
+
+- `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/executor/XxlJobExecutor.java`
+- `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/openapi/impl/ExecutorBizImpl.java`
+- `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/thread/JobThread.java`
+- `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/thread/TriggerCallbackThread.java`
+- `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/thread/ExecutorRegistryThread.java`
+- `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/log/XxlJobFileAppender.java`
+
+补充参考：
 
 - `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/server/EmbedServer.java`
-- `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/openapi/impl/ExecutorBizImpl.java`
-- `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/executor/XxlJobExecutor.java`
-- `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/thread/JobThread.java`
-- `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/thread/ExecutorRegistryThread.java`
-- `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/thread/TriggerCallbackThread.java`
 - `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/constant/Const.java`
 - `E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/constant/ExecutorBlockStrategyEnum.java`
 
-管理端任务模型参考文件：
-
-- `E:/code/java/xxl-job/xxl-job-admin/src/main/java/com/xxl/job/admin/controller/biz/JobInfoController.java`
-- `E:/code/java/xxl-job/xxl-job-admin/src/main/java/com/xxl/job/admin/service/impl/XxlJobServiceImpl.java`
-- `E:/code/java/xxl-job/xxl-job-admin/src/main/java/com/xxl/job/admin/model/XxlJobInfo.java`
-- `E:/code/java/xxl-job/xxl-job-admin/src/main/java/com/xxl/job/admin/model/XxlJobGroup.java`
-- `E:/code/java/xxl-job/xxl-job-admin/src/main/java/com/xxl/job/admin/scheduler/trigger/JobTrigger.java`
-- `E:/code/java/xxl-job/xxl-job-admin/src/main/java/com/xxl/job/admin/scheduler/route/ExecutorRouteStrategyEnum.java`
-- `E:/code/java/xxl-job/xxl-job-admin/src/main/java/com/xxl/job/admin/scheduler/route/strategy/ExecutorRouteBusyover.java`
-- `E:/code/java/xxl-job/xxl-job-admin/src/main/java/com/xxl/job/admin/scheduler/openapi/OpenApiController.java`
-
 ### 2.2 Python 当前实现
 
-- `E:/code/python/pyxxl/pyxxl/protocol/server.py`
-- `E:/code/python/pyxxl/pyxxl/runtime/executor.py`
+当前 Python executor 的核心实现位置：
+
 - `E:/code/python/pyxxl/pyxxl/app/runner.py`
-- `E:/code/python/pyxxl/pyxxl/protocol/admin_client.py`
 - `E:/code/python/pyxxl/pyxxl/config/executor.py`
+- `E:/code/python/pyxxl/pyxxl/context/runtime.py`
 - `E:/code/python/pyxxl/pyxxl/model/run_data.py`
+- `E:/code/python/pyxxl/pyxxl/protocol/server.py`
+- `E:/code/python/pyxxl/pyxxl/protocol/admin_client.py`
+- `E:/code/python/pyxxl/pyxxl/runtime/executor.py`
+- `E:/code/python/pyxxl/pyxxl/runtime/handlers.py`
+- `E:/code/python/pyxxl/pyxxl/runtime/callbacks.py`
 - `E:/code/python/pyxxl/pyxxl/logger/disk.py`
 - `E:/code/python/pyxxl/pyxxl/logger/redis.py`
-- `E:/code/python/pyxxl/pyxxl/monitoring/prometheus.py`
 
 ---
 
-## 3. 第一阶段完成定义
+## 3. 已对齐的核心能力
 
-第一阶段完成后，应该满足以下标准：
+下面这些可以视为“当前已基本对齐 Java 官方 executor 的核心能力”。
 
-- Python 执行器可被 `xxl-job-admin` 正常注册、下线、调度、杀死、拉日志
-- `ROUND`、`FAILOVER`、`BUSYOVER`、`SHARDING_BROADCAST` 等常用管理端路由策略在 Python 执行器上行为可预测
-- 阻塞策略 `SERIAL_EXECUTION`、`DISCARD_LATER`、`COVER_EARLY` 行为与 Java 官方核心语义一致
-- callback 不因 admin 短暂不可用而丢失
-- 执行器入站请求有 token 校验
-- 关键行为有自动化测试覆盖
+| 能力 | Java 官方基线 | Python 当前实现 | 结论 |
+| --- | --- | --- | --- |
+| `/beat` | `ExecutorBizImpl.beat()` | `pyxxl/protocol/server.py` | 已对齐 |
+| `/idleBeat` 忙碌判断 | `JobThread.isRunningOrHasQueue()` | `Executor.is_running_or_has_queue()` | 已对齐 |
+| `/run` 基础调度流程 | `ExecutorBizImpl.run()` | `server.py + runtime/executor.py` | 已对齐 |
+| `/kill` | `ExecutorBizImpl.kill()` | `server.py + Executor.cancel_job()` | 已对齐 |
+| `/log` 接口协议 | `ExecutorBizImpl.log()` | `server.py + logger/*` | 已对齐协议 |
+| access token 校验 | `EmbedServer` / `Const.XXL_JOB_ACCESS_TOKEN` | `validate_access_token()` | 已对齐 |
+| `SERIAL_EXECUTION` | `JobThread.pushTriggerQueue()` | `Executor._handle_serial_execution()` | 已对齐 |
+| `DISCARD_LATER` | `ExecutorBizImpl.run()` | `Executor._handle_discard_later()` | 已对齐 |
+| `COVER_EARLY` | `ExecutorBizImpl.run() + registJobThread()` | `Executor._handle_cover_early()` | 已对齐核心语义 |
+| `logId` 去重 | `JobThread.triggerLogIdSet` | `_job_log_ids` | 已对齐 |
+| kill 后运行中任务失败 callback | `JobThread finally` | `_cleanup_task()` / `_run()` | 已对齐 |
+| kill 后排队任务失败 callback | `JobThread` 清空队列 | `_push_failed_queued_tasks()` | 已对齐 |
+| callback 异步补偿 | `TriggerCallbackThread` | `CallbackManager` | 已对齐核心能力 |
+| callback 启动恢复 | `retryFailCallbackFile()` | `_replay_persisted_requests()` | 已对齐 |
+| admin 多地址 failover | Java 逐个尝试 `AdminBiz` | `XXL._post()` 逐地址尝试 | 已对齐 |
+| registry / registryRemove | `ExecutorRegistryThread` | `_register_task()` + `registryRemove()` | 已对齐基础能力 |
+| 任务运行上下文 | `XxlJobContext / XxlJobHelper` | `g + RunData` | 已对齐核心用法 |
+| Prometheus 指标 | Java 无原生同名模块 | `monitoring/prometheus.py` | Python 额外增强 |
 
----
+补充说明：
 
-## 4. 差距总览
-
-### 已实现
-
-- 执行器基础接口已实现：`/beat`、`/idleBeat`、`/run`、`/kill`、`/log`
-- admin 侧调用已实现：`registry`、`registryRemove`、`callback`
-- 支持三种阻塞策略
-- 支持任务日志读取
-- 支持 async handler 和 sync handler
-
-### 主要缺口
-
-- 多 admin、registry 生命周期与 Java 线程模型还未完全对齐
-- 同步重任务取消能力较弱
-- 日志实现与 Java 的按日期目录、长日志分页仍有差距
-- 部分监控与生命周期增强项还未完成
-
----
-
-## 5. P0 清单：必须先做
-
-### P0-01 入站 access token 校验
-
-目标：
-
-- Python 执行器对 `/beat`、`/idleBeat`、`/run`、`/kill`、`/log` 的请求，必须校验 `XXL-JOB-ACCESS-TOKEN`
-
-官方基线：
-
-- Java 在 `EmbedServer.dispatchRequest` 中校验 token
-- 参考：`E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/server/EmbedServer.java`
-
-当前现状：
-
-- Python 仅在对 admin 发请求时携带 token
-- 执行器服务端未校验任何 header
-- 参考：`E:/code/python/pyxxl/pyxxl/protocol/admin_client.py`
-- 参考：`E:/code/python/pyxxl/pyxxl/protocol/server.py`
-
-改造任务：
-
-- [x] 在 `server.py` 增加统一鉴权中间件或公共校验函数
-- [x] 对所有 executor 路由校验 `XXL-JOB-ACCESS-TOKEN`
-- [x] 与 Java 行为保持一致：未通过时返回 `code=500` 风格失败结果，而不是抛框架默认异常
-- [x] 增加无 token、错误 token、正确 token 的接口测试
-
-验收标准：
-
-- 未携带 token 时 admin 无法调度 Python executor
-- token 正确时所有接口正常
-- 错误 token 时返回格式与 XXL-JOB 风格兼容
+- Python 当前不仅支持 `async`，还补了 `process` 模式。这不是 Java 官方的等价实现，但对 Python 爬虫场景非常有价值。
+- 这也是为什么当前版本更适合作为“面向 Python 任务的 executor”，而不是机械复刻 Java 类结构。
 
 ---
 
-### P0-02 callback 改为独立队列 + 重试补偿
+## 4. 最后一轮剩余差异
 
-目标：
+下面这些是截至当前版本，仍然和 Java 官方 executor 不完全等价的地方。
 
-- 任务执行结束后，不直接在执行协程中把 callback 当成最终动作
-- 要有独立 callback 队列、后台发送、失败重试
+### 4.1 执行模型与中断语义仍然不等价
 
-官方基线：
+优先级：`P1`
 
-- Java 使用 `TriggerCallbackThread`
-- callback 失败会落盘，后续重试
-- 参考：`E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/thread/TriggerCallbackThread.java`
+Java 官方：
 
-当前现状：
+- 每个 `jobId` 对应一个 `JobThread`
+- `JobThread.toStop()` + `interrupt()` 共同参与停止
+- 超时场景下，`JobThread` 还会启动单独的 `futureThread` 并在超时后 `futureThread.interrupt()`
 
-- Python 在 `Executor._run()` 内直接 `await xxl_client.callback(...)`
-- 一旦 admin 不可用，回调失败风险直接暴露到任务结束路径
-- 参考：`E:/code/python/pyxxl/pyxxl/runtime/executor.py`
+关键事实：
 
-改造任务：
+- Java 也不是真正意义上的“硬杀”
+- `JobThread` 源码自己就写明了：`interrupt` 只对 `wait/join/sleep` 这类阻塞状态有效，不会无条件终止任意运行中的线程
 
-- [x] 新增 callback manager，维护异步队列
-- [x] 任务结束时只负责 enqueue callback 请求
-- [x] 独立后台任务发送 callback，并在失败后异步重试
-- [x] callback 失败时记录本地补偿文件或 Redis 持久化补偿队列
-- [x] 执行器启动后自动重放失败 callback
-- [x] 停机时尽量 flush callback 队列
+Python 当前：
 
-当前进度：
+- `async` 模式用 `asyncio.Task`
+- `thread` 模式进入线程池，靠 `g.cancel_event` 协作取消
+- `process` 模式使用子进程，是当前最接近“强隔离”的方案
 
-- 已完成内存队列 + 后台 worker + 失败重试 + `graceful_close` 阶段 flush
-- 已完成本地补偿文件落盘与启动恢复重放
-- 当前仍未做 Redis 版 callback 补偿队列，但按本清单目标，基于本地文件的补偿链路已经满足 `P0-02`
+真实差异不是“Java 能强杀、Python 不能”，而是：
 
-验收标准：
+- Java 的 `JobThread` 是专属线程模型，中断语义更集中
+- Python 的 `thread` 模式跑在线程池里，控制力更弱
+- Python 的 `process` 模式反而是一个更务实的补强方案
 
-- admin 短暂不可达时，任务结果不会直接丢失
-- admin 恢复后 callback 能补发成功
-- callback 线程/协程异常不会影响任务执行主路径
+对业务的影响：
 
----
-
-### P0-03 `idleBeat` 语义对齐 Java
-
-目标：
-
-- `idleBeat(jobId)` 必须在“任务运行中”或“该 jobId 仍有触发排队”时都返回忙碌
-
-官方基线：
-
-- Java 的 `idleBeat` 调用 `jobThread.isRunningOrHasQueue()`
-- 参考：`E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/openapi/impl/ExecutorBizImpl.java`
-- 参考：`E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/thread/JobThread.java`
-
-当前现状：
-
-- Python `idleBeat` 仅通过 `job_id in self.tasks` 判断
-- 队列非空但当前刚切换状态时可能判断不准
-- 参考：`E:/code/python/pyxxl/pyxxl/protocol/server.py`
-
-改造任务：
-
-- [x] 为 executor 新增 `is_running_or_has_queue(job_id)` 方法
-- [x] `/idleBeat` 改为调用该方法
-- [x] 增加针对 `BUSYOVER` 语义的测试用例
-
-验收标准：
-
-- 同一 `jobId` 有排队任务时，`idleBeat` 返回忙碌
-- 管理端 `BUSYOVER` 路由不会错误选中繁忙节点
-
----
-
-### P0-04 增加 `logId` 去重
-
-目标：
-
-- 相同 `jobId + logId` 的重复调度请求不能被重复执行
-
-官方基线：
-
-- Java 在 `JobThread.pushTriggerQueue()` 中维护 `triggerLogIdSet`
-- 参考：`E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/thread/JobThread.java`
-
-当前现状：
-
-- Python 当前没有等价去重集合
-- 同一调度日志可能被重复接受
-- 参考：`E:/code/python/pyxxl/pyxxl/runtime/executor.py`
-
-改造任务：
-
-- [x] 增加每个 `jobId` 维度的 `logId` 去重结构
-- [x] 任务执行前、入队前都做 dedupe
-- [x] 完成或取消后清理 dedupe 记录
-- [x] 增加重复触发测试
-
-验收标准：
-
-- 相同 `logId` 重复 `run` 不会触发两次执行
-- 返回错误消息与 Java 行为尽量接近
-
----
-
-### P0-05 kill 与停机时，对排队任务补发失败 callback
-
-目标：
-
-- 被 kill 的正在执行任务要回调失败
-- 队列中尚未执行的任务也要回调失败
-
-官方基线：
-
-- Java 在 `JobThread` 停止后，会给队列中未执行的 trigger 全部推送失败 callback
-- 参考：`E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/thread/JobThread.java`
-
-当前现状：
-
-- Python `cancel_job(include_queue=True)` 会直接丢弃队列任务，不回调
-- 当前测试也是按“不回调”写的
-- 参考：`E:/code/python/pyxxl/pyxxl/runtime/executor.py`
-
-改造任务：
-
-- [x] 取消运行中任务时，回调失败结果
-- [x] 清空等待队列时，为每个被丢弃任务补发失败 callback
-- [x] 修改测试用例，按官方语义断言
-
-验收标准：
-
-- 被 kill 后，admin 上每个调度日志都有最终状态
-- 不会出现队列任务静默消失
-
----
-
-### P0-06 `COVER_EARLY` 行为对齐
-
-目标：
-
-- `COVER_EARLY` 必须明确体现为“旧任务停止，新任务接管”
-
-官方基线：
-
-- Java 的实现是让旧 `JobThread` 退出，再建立新线程，并将新 trigger 入队
-- 参考：`E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/openapi/impl/ExecutorBizImpl.java`
-
-当前现状：
-
-- Python 当前是：先把新任务塞队列，再异步 cancel 旧任务
-- 能工作，但时序不够明确，边界条件更多
-- 参考：`E:/code/python/pyxxl/pyxxl/runtime/executor.py`
-
-改造任务：
-
-- [x] 明确 `COVER_EARLY` 的状态机
-- [x] 确保旧任务被标记为失败，新任务一定获得执行机会
-- [x] 避免竞态导致两次 `_finish`、队列错位或状态覆盖
-- [x] 增加快速连续触发的并发测试
-
-验收标准：
-
-- `COVER_EARLY` 连续触发时只保留最新任务
-- admin 端日志结果可解释，旧任务有失败结论，新任务成功执行
-
-当前进度：
-
-- 已改为“保留一个待接管 replacement，旧任务结束后再启动新任务”的明确状态机
-- 已补齐 `asyncio.create_task()` 后、任务尚未真正进入 `_run()` 就被取消的清理路径
-- 已增加“替换排队任务”“连续多次只保留最新一次”的自动化测试
-
----
-
-### P0-07 支持多 admin 地址
-
-目标：
-
-- Python executor 能像 Java 一样配置多个 admin 地址
-
-官方基线：
-
-- Java `XxlJobExecutor.initAdminBizList()` 支持逗号分隔多地址
-- 注册与 callback 都会依次尝试多个 admin
-- 参考：`E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/executor/XxlJobExecutor.java`
-
-当前现状：
-
-- Python `xxl_admin_baseurl` 是单字符串单地址
-- 参考：`E:/code/python/pyxxl/pyxxl/config/executor.py`
-- 参考：`E:/code/python/pyxxl/pyxxl/protocol/admin_client.py`
-
-改造任务：
-
-- [x] 配置层支持 `xxl_admin_baseurls` 或兼容逗号分隔字符串
-- [x] registry 支持多地址尝试
-- [x] callback 支持多地址尝试
-- [x] registryRemove 支持多地址尝试
-- [x] 增加一个 admin 不可用、另一个可用的测试
-
-验收标准：
-
-- 任一 admin 可达时 executor 能继续完成注册和回调
-
-当前进度：
-
-- 已支持逗号分隔多 admin 地址，并兼容填写 admin 根地址或 `/api` 地址
-- `registry`、`callback`、`registryRemove` 均按地址顺序依次尝试，任一成功即返回
-- 已增加一个 admin 不可用、另一个可用的 failover 自动化测试
-
----
-
-### P0-08 注册线程与下线流程对齐
-
-目标：
-
-- 注册心跳、停止注册、下线注销流程要稳定
-
-官方基线：
-
-- Java 使用独立 `ExecutorRegistryThread`
-- 心跳周期使用 `Const.BEAT_TIMEOUT = 30`
-- 停止时先中断线程，再 `registryRemove`
-- 参考：`E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/thread/ExecutorRegistryThread.java`
-- 参考：`E:/code/java/xxl-job/xxl-job-core/src/main/java/com/xxl/job/core/constant/Const.java`
-
-当前现状：
-
-- Python 用 `_register_task()` 每 10 秒注册一次
-- 停止阶段直接 `register_task.cancel()` 然后调用 `registryRemove`
-- 参考：`E:/code/python/pyxxl/pyxxl/app/runner.py`
-
-改造任务：
-
-- [ ] 将注册周期做成可配置，默认对齐 30s
-- [ ] 明确“注册协程已停止”与“已执行下线”的顺序
-- [ ] 异常情况下确保不会因为单次 `registryRemove` 失败而无日志
-- [ ] 增加 stop/cleanup 测试
-
-验收标准：
-
-- 执行器关闭后 admin 中地址能及时下线
-- 注册协程异常时可见日志充分
-
----
-
-### P0-09 同步任务的隔离与取消能力
-
-目标：
-
-- 对公司爬虫这类阻塞型 Python 任务，至少要有可控的取消与超时语义
-
-官方基线：
-
-- Java 用线程模型，`interrupt + toStop` 虽然不完美，但有长期沉淀
-- Python 阻塞任务更难中断，线程池方案风险更高
-
-当前现状：
-
-- Python sync handler 通过 `asyncio.to_thread()` 执行
-- 超时或取消后，只能通过 `cancel_event` 让业务代码自行配合
-- 若业务不配合，线程仍可能继续跑
-- 参考：`E:/code/python/pyxxl/pyxxl/runtime/executor.py`
-
-改造任务：
-
-- [ ] 第一阶段最少保留现有线程模式，但明确文档限制
-- [ ] 新增“进程执行模式”设计占位，作为 P1/P2 重点
-- [ ] 为 sync handler 增加测试，验证超时后能正确上报失败
-- [ ] 为爬虫任务预留 `process` 模式配置项
-
-验收标准：
-
-- 文档明确哪些任务可直接跑在线程池，哪些必须走子进程
-- 不会误导业务方把浏览器/驱动类任务直接堆在线程池
-
----
-
-### P0-10 修复 metrics 钩子 bug
-
-目标：
-
-- success/failed 计数真正生效
-
-当前现状：
-
-- `main.py` 中赋值的是 `_successed_callback` / `_failed_callback`
-- `executor.py` 实际调用的是 `successed_callback` / `failed_callback`
-- 参考：`E:/code/python/pyxxl/pyxxl/app/runner.py`
-- 参考：`E:/code/python/pyxxl/pyxxl/runtime/executor.py`
-
-改造任务：
-
-- [x] 修复属性名
-- [x] 增加 metrics 行为测试，而不是只断言 `/metrics` 接口存在
-
-验收标准：
-
-- 成功执行后成功计数增加
-- 失败/取消/超时后失败计数增加
-
-当前进度：
-
-- 已改为在 `main.Executor` 中显式注入 `successed_callback` / `failed_callback`
-- 已增加 `/metrics` 下 success / failed counter 的行为测试
-
----
-
-### P0-11 自动化测试补齐
-
-目标：
-
-- 第一阶段所有关键行为必须有测试，不靠手工 admin 点点点
-
-测试重点：
-
-- [x] token 鉴权
-- [x] callback 补偿
-- [x] idleBeat + queue 语义
-- [x] logId 去重
-- [x] kill queued task callback
-- [x] multi-admin failover
-- [x] block strategy 并发边界
-
-说明：
-
-- 当前环境已安装 `pytest`
-- 测试命令暂定：
-
-```powershell
-py -m pip install -e .[dev,dotenv,metrics,redis]
-py -m pytest -q
-```
-
----
-
-## 6. P1 清单：建议紧接着做
-
-### P1-01 增强日志读取与兼容性
-
-- [ ] 评估是否需要对齐 Java 的按日期分目录日志组织
-- [ ] 优化磁盘日志中间行读取效率
-- [ ] Redis 日志读取改为异步或后台线程，避免阻塞事件循环
-- [ ] 长日志分页与 `fromLineNum` 语义覆盖测试
-
-### P1-02 IP 获取与网络配置增强
-
-- [ ] 替换 `get_network_ip()` 的简化实现
-- [ ] 支持更可靠的网卡/IP 选择策略
-- [ ] 明确 `executor_url` 与 `executor_listen_host` 的职责
-
-### P1-03 生命周期与关停增强
-
-- [ ] `shutdown()` 时不应只清空内存队列，要保证状态闭环
-- [ ] 线程池、日志任务、callback 任务、registry 任务退出顺序明确
-- [ ] 增加长任务下的 graceful close 测试
-
-### P1-04 协议兼容矩阵
-
-- [ ] 明确支持的 XXL-JOB 版本范围
-- [ ] 回归验证 2.x、3.x 的回调与日志格式差异
-- [ ] 将兼容逻辑集中管理，避免散落在注释和条件判断里
-
-### P1-05 可观测性增强
-
-- [ ] metrics 增加 callback queue 长度、registry 状态、dropped task 数量
-- [ ] executor 级别日志增加结构化字段
-- [ ] 增加“当前运行任务”和“当前排队任务”的可观测数据
-
----
-
-## 7. P2 清单：面向公司爬虫的接入层
-
-这一层不是“XXL-JOB 执行器协议必须项”，但如果目标是“方便公司爬虫接入”，就应该尽快开始设计。
-
-### P2-01 固定 handler：`crawler_dispatch`
+- `async` 任务基本没有问题
+- 浏览器驱动、长阻塞采集、第三方同步库任务，应该优先使用 `process`
+- 不应再试图把“线程池模式完全做到和 Java 一样”作为目标
 
 建议：
 
-- 不要让每个爬虫任务都在 XXL-JOB 上绑定一个 Python 函数名
-- 建议保留少量固定 handler，例如：
-  - `crawler_dispatch`
-  - `crawler_maintenance`
-  - `crawler_backfill`
+- 保持当前 `thread/process` 双模式
+- 文档和示例继续明确：重任务默认 `process`
+- 不建议继续投入做“线程池硬中断”
 
-### P2-02 任务参数标准化
+### 4.2 Java 的 GLUE / Script / `@XxlJob(init, destroy)`，Python 还没有
 
-建议 `executorParam` 不直接塞随意文本，统一成 JSON：
+优先级：`P2`
 
-```json
-{
-  "task_code": "jd_goods_daily",
-  "task_version": "2026-03-01",
-  "env": "prod",
-  "args": {
-    "shop_id": 123,
-    "date": "2026-03-29"
-  },
-  "resources": {
-    "proxy_pool": "default",
-    "browser": false
-  }
-}
-```
+Java 官方：
 
-要做的事：
+- `ExecutorBizImpl.run()` 支持 `BEAN`、`GLUE_GROOVY`、脚本类型
+- `XxlJobExecutor.registryJobHandler()` 支持 `@XxlJob(value, init, destroy)`
+- handler 生命周期里有 `init()` / `destroy()`
 
-- [ ] 定义参数 schema
-- [ ] 执行前校验
-- [ ] 日志中打印标准化任务上下文
+Python 当前：
 
-### P2-03 子进程执行模型
+- 只支持显式注册 Python 函数
+- 注册方式是 `@app.register(...)`
+- 没有 GLUE 动态脚本执行
+- 没有 `init/destroy` 生命周期钩子扫描
+- 没有自动扫描包并注册 handler
 
-适用场景：
+这是不是缺陷，要看目标：
 
-- Playwright / Selenium
-- 长阻塞网络采集
-- 依赖驱动和浏览器的爬虫
-- 需要 kill 时真正终止的任务
-
-要做的事：
-
-- [ ] 设计 `process` 模式执行器
-- [ ] 父进程负责 XXL-JOB 协议和回调
-- [ ] 子进程负责真正执行爬虫
-- [ ] 父子进程间传状态、日志、取消信号
-
-### P2-04 产物与检查点
-
-- [ ] 统一任务输出目录
-- [ ] 支持 artifact 上报
-- [ ] 支持 checkpoint / resume
-- [ ] 失败后可定位到快照、请求样本、页面截图
-
-### P2-05 与 admin 的内部管理 API
-
-背景：
-
-- 官方 `/api/*` OpenAPI 只给执行器用
-- 不提供任务 CRUD
-- 任务管理逻辑在 `JobInfoController` / `XxlJobServiceImpl`
+- 对“公司爬虫接入 XXL-JOB”来说，不是核心缺陷
+- 对“完全复刻 Java executor 生态”来说，这是明确差异
 
 建议：
 
-- [ ] 在 `xxl-job-admin` 内增加公司内部 API
-- [ ] 通过 service 层安全创建/更新爬虫任务
-- [ ] 不要让 Python 直接写 admin 库表
+- 当前阶段不要优先补 GLUE/script
+- 如果后面确实需要，可单独做一个“Python 发现层”
+- 但这层应该是可选增强，不要污染当前简洁的 decorator API
 
-建议新增能力：
+### 4.3 registry 生命周期细节还没完全按 Java 线程模型实现
 
-- `upsert crawler job`
-- `publish crawler version`
-- `pause/resume crawler job`
-- `manual trigger crawler job`
-- `bind task_code -> xxl_job_info.id`
+优先级：`P1`
 
-### P2-06 任务模板化
+Java 官方：
 
-建议按爬虫类型沉淀模板：
+- `ExecutorRegistryThread` 使用独立线程
+- 心跳周期使用 `Const.BEAT_TIMEOUT`，默认 `30s`
+- `toStop()` 时 `interrupt + join`
+- `registryRemove` 在 registry 线程退出时统一执行
 
-- [ ] 周期增量模板
-- [ ] 全量回刷模板
-- [ ] 分片广播模板
-- [ ] 单节点串行模板
-- [ ] 故障恢复模板
+Python 当前：
+
+- `PyxxlRunner._register_task()` 使用 `asyncio` 后台任务
+- 当前周期是 `10s`
+- 退出时先取消任务，再在 cleanup 中主动调用 `registryRemove`
+- 没有显式的 registry 状态对象和失败退避状态
+
+当前实现是可用的，但和 Java 仍有差异：
+
+- 心跳节奏不同
+- 停止顺序不完全同构
+- 注册状态的可观测性更弱
+
+建议：
+
+- 把 registry 周期改成可配置，并默认贴近 Java 的 `30s`
+- 增加 registry 成功/失败时间戳、最近错误、连续失败次数
+- 为 registry 单独暴露 metrics 或运行态状态
+
+### 4.4 callback 仍未完全对齐 Java 的“批量 + 日志回写”语义
+
+优先级：`P1`
+
+Java 官方：
+
+- `TriggerCallbackThread` 先 `take()` 一个，再 `drainTo()` 批量发送
+- 失败补偿放到 `callbacklogs/`
+- callback 成功、失败、异常会写入对应任务日志文件
+
+Python 当前：
+
+- `CallbackManager` 以单个 `CallbackRequest` 为单位处理
+- 失败补偿写到 `logs/.callback_failures/*.json`
+- 会重放、会重试，但不会像 Java 那样把 callback 生命周期回写到对应任务日志
+
+影响：
+
+- 功能上已经够用
+- 但高并发回调下，Java 的批量发送更省请求
+- Java 的任务日志里能更清楚看到 callback 成功/失败痕迹，Python 目前这块可观测性较弱
+
+建议：
+
+- 增加可选批量 callback 投递
+- 在任务日志里补充 callback 成功/失败摘要
+- 保留当前 JSON 持久化格式即可，不必强行完全复刻 Java 的文件命名
+
+### 4.5 磁盘日志目录结构和清理策略还没有对齐 Java
+
+优先级：`P1`
+
+Java 官方：
+
+- 日志目录结构：`logBasePath/yyyy-MM-dd/{logId}.log`
+- 还维护 `gluesource/`、`callbacklogs/`
+- `readLog()` 按文件逐行读取
+- 日志清理按“日期目录”删除，且 `logRetentionDays >= 3` 才生效
+
+Python 当前：
+
+- 任务日志文件名：`logs/pyxxl-{logId}.log`
+- callback 补偿目录：`logs/.callback_failures/`
+- 没有 `yyyy-MM-dd` 日期目录
+- 当前清理逻辑按文件创建时间扫描
+- 单次日志查询有 `1000` 行上限
+
+当前协议兼容性没有问题，但仍有差异：
+
+- 和 Java 的日志落盘目录不一致
+- 管理台侧排障时，不方便和 Java executor 按同一磁盘结构看问题
+- 长日志翻页效率与 Java 也不是同一种策略
+
+建议：
+
+- 如果要继续追平，优先把磁盘日志改成 `yyyy-MM-dd/{logId}.log`
+- callback 补偿目录也可改成显式 `callbacklogs/`
+- 这项对外 API 不影响，只影响内部实现和运维体验
+
+### 4.6 Java 的常驻 `JobThread` 与空闲回收语义，Python 没有完全等价结构
+
+优先级：`P2`
+
+Java 官方：
+
+- 每个 `jobId` 会持有一个 `JobThread`
+- 线程空闲轮询超过阈值后，会主动从 `jobThreadRepository` 移除
+
+Python 当前：
+
+- 没有常驻线程对象
+- 当前是“运行中的 task + 按 `jobId` 分队列 + lock + replacement 状态”
+- 更贴近 Python 运行时，但不是 Java 的同构模型
+
+这项差异是否值得补，要看收益：
+
+- 从业务效果看，不是核心问题
+- 从调试和和 Java 一一映射的角度看，这是结构差异
+
+建议：
+
+- 不建议为了类结构相似而强行引入常驻 `JobThread` 式对象
+- 当前状态机已经足够清晰
+
+### 4.7 Java 的配置面更完整，Python 仍是“业务友好优先”
+
+优先级：`P2`
+
+Java 官方额外有这些语义：
+
+- `enabled=false` 可直接关闭 executor 初始化
+- `appname` 为空可关闭自动注册
+- `address / ip / port` 三者语义区分更细
+
+Python 当前：
+
+- 更偏向“启动就工作”的配置风格
+- 通过 `executor_url` 和 `executor_listen_host/port` 已覆盖大多数场景
+- 但还没有完全同名、同语义地复刻 Java 配置面
+
+结论：
+
+- 这是配置风格差异，不是主链路缺陷
 
 ---
 
-## 8. 推荐实现顺序
+## 5. 哪些事情根本不属于 executor
 
-### 里程碑 M1：先做到“可替代现有 pyxxl”
+这部分必须明确，不然很容易越做越偏。
 
-- [x] P0-01 token 校验
-- [x] P0-02 callback 队列与补偿
-- [x] P0-03 idleBeat 语义对齐
-- [x] P0-04 logId 去重
-- [x] P0-05 kill queued task callback
-- [x] P0-06 COVER_EARLY 时序对齐
-- [x] P0-07 multi-admin
-- [x] P0-10 metrics bug 修复
-- [x] P0-11 自动化测试
+不属于 Python executor 的范围：
 
-### 里程碑 M2：做到“公司可上线”
+- 任务 CRUD
+- cron 修改
+- 发布、暂停、恢复
+- 任务分组管理
+- 直接写 `xxl-job-admin` 数据库
+- “丢失任务补单”这类 admin 侧兜底逻辑
 
-- [ ] P1-01 日志增强
-- [ ] P1-02 网络配置增强
-- [ ] P1-03 生命周期增强
-- [ ] P1-04 协议兼容矩阵
-- [ ] P1-05 可观测性增强
+这些都应该留在：
 
-### 里程碑 M3：做到“爬虫接入友好”
+- `xxl-job-admin`
+- 或你们公司自己加在 admin 侧的内部 API / service 层
 
-- [ ] P2-01 固定 handler 方案
-- [ ] P2-02 参数 schema
-- [ ] P2-03 子进程执行模型
-- [ ] P2-04 artifact/checkpoint
-- [ ] P2-05 admin 内部 API
-- [ ] P2-06 模板化接入
+不要把这些能力堆进 Python executor。
+
+executor 应该只负责：
+
+- 接收调度
+- 管理本地运行时
+- 记录日志
+- 回调结果
 
 ---
 
-## 9. 建议的目录调整
+## 6. 面向公司爬虫接入的建议优先级
 
-建议在 Python 侧重构为：
+如果目标是“现在就让爬虫任务稳定接入 XXL-JOB”，建议按下面的顺序做。
 
-```text
-pyxxl/
-  server.py
-  client/
-  protocol/
-  runtime/
-    executor.py
-    callback_manager.py
-    registry_manager.py
-    task_state.py
-  worker/
-    async_runner.py
-    thread_runner.py
-    process_runner.py
-  log/
-  metrics/
-  tests/
-```
+### 6.1 现在就够用的部分
 
-目的：
+以下能力已经足够支撑接入：
 
-- 把“协议层”和“运行时层”拆开
-- 后面做子进程模型时不需要推翻当前结构
+- `async` handler
+- `process` 模式重任务
+- block strategy
+- callback 补偿
+- access token
+- 多 admin failover
+- `/log` 查看任务日志
 
----
+### 6.2 真要继续追平，建议只做这三项
 
-## 10. 接手说明
+建议优先继续做的只有：
 
-如果上下文中断，新的执行者应按以下顺序继续：
+1. 日志目录对齐 Java
+   把磁盘日志改成 `yyyy-MM-dd/{logId}.log`
+2. callback 批量发送 + callback 日志回写
+   提升高并发场景的可观测性
+3. registry 生命周期可观测
+   周期、状态、失败次数、退避策略更清晰
 
-1. 先读本文件
-2. 再读 Java 官方以下文件：
-   - `EmbedServer.java`
-   - `ExecutorBizImpl.java`
-   - `JobThread.java`
-   - `TriggerCallbackThread.java`
-   - `ExecutorRegistryThread.java`
-3. 再读 Python 当前以下文件：
-   - `server.py`
-   - `executor.py`
-   - `main.py`
-   - `xxl_client.py`
-4. 从 M1 开始，按编号顺序推进
+### 6.3 当前不建议优先做的项
 
-推荐交接提示词：
+以下项不建议现在投入：
 
-```text
-请根据 docs/PYTHON_EXECUTOR_PARITY_CHECKLIST.md 继续推进 M1。
-先完成 P0-01 到 P0-03，修改代码并补测试。
-```
+- GLUE_GROOVY / script 执行
+- 自动扫描包并注册 handler
+- 模拟 Java 常驻 `JobThread`
+- 把 Python 线程池模式强行做成“像 Java 一样可中断”
+- 在 executor 里直接加任务管理 API
 
 ---
 
-## 11. 当前已确认的问题列表
+## 7. 最终判断
 
-- [x] Python 执行器服务端未校验 access token（已修复）
-- [x] callback 无独立队列与失败补偿
-- [x] `idleBeat` 仅检查 running，不检查 queue
-- [x] 无 `logId` 去重
-- [x] kill 队列任务时不回调失败
-- [x] 单 admin 地址限制
-- [x] sync 任务超时无法强制终止线程
-- [x] metrics success/failed 钩子属性名写错
-- [x] `OpenApiController` 不提供任务 CRUD，若要自动建任务应在 admin 侧补内部 API
+截至当前版本，可以这样评价：
 
----
+- 对 `xxl-job-admin` 来说，这已经是一个合格的 Python executor
+- 对 Python 业务方来说，顶层 API 已经足够简洁稳定
+- 对爬虫任务来说，只要把重任务放到 `process` 模式，整体效果已经非常接近 Java 官方 executor
 
-## 12. 本文件维护规则
+仍然不完全等价的地方主要是：
 
-后续推进时请遵守：
+- Java 的 `JobThread` / `GLUE` / `Script` / `init-destroy` 生命周期体系
+- callback 的批量与日志回写
+- registry 和日志目录的内部实现细节
 
-- 每完成一项，将对应 checkbox 勾掉
-- 若实现方案发生变化，先改本文件再改代码
-- 若发现与官方 Java 行为不一致的新点，追加新编号，不要改旧编号含义
-- 若决定某项不做，必须补“原因”和“替代方案”
+所以现在最准确的说法不是：
+
+- “已经 100% 复刻 Java executor”
+
+而是：
+
+- “已经完成 Python executor 的核心对齐，剩下的是少数内部机制和运维细节差异”
+
+如果你后面还要继续学这个框架，建议配合阅读：
+
+- `docs/JAVA_PYTHON_EXECUTOR_COMPARISON_AND_STUDY_GUIDE.md`
+- `docs/XXL_JOB_PYTHON_EXECUTOR_USAGE.md`
+
