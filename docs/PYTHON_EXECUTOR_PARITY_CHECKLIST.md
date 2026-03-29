@@ -65,15 +65,15 @@
 
 ### 2.2 Python 当前实现
 
-- `E:/code/python/pyxxl/pyxxl/server.py`
-- `E:/code/python/pyxxl/pyxxl/executor.py`
-- `E:/code/python/pyxxl/pyxxl/main.py`
-- `E:/code/python/pyxxl/pyxxl/xxl_client.py`
-- `E:/code/python/pyxxl/pyxxl/setting.py`
-- `E:/code/python/pyxxl/pyxxl/schema.py`
+- `E:/code/python/pyxxl/pyxxl/protocol/server.py`
+- `E:/code/python/pyxxl/pyxxl/runtime/executor.py`
+- `E:/code/python/pyxxl/pyxxl/app/runner.py`
+- `E:/code/python/pyxxl/pyxxl/protocol/admin_client.py`
+- `E:/code/python/pyxxl/pyxxl/config/executor.py`
+- `E:/code/python/pyxxl/pyxxl/model/run_data.py`
 - `E:/code/python/pyxxl/pyxxl/logger/disk.py`
 - `E:/code/python/pyxxl/pyxxl/logger/redis.py`
-- `E:/code/python/pyxxl/pyxxl/prometheus.py`
+- `E:/code/python/pyxxl/pyxxl/monitoring/prometheus.py`
 
 ---
 
@@ -126,8 +126,8 @@
 
 - Python 仅在对 admin 发请求时携带 token
 - 执行器服务端未校验任何 header
-- 参考：`E:/code/python/pyxxl/pyxxl/xxl_client.py`
-- 参考：`E:/code/python/pyxxl/pyxxl/server.py`
+- 参考：`E:/code/python/pyxxl/pyxxl/protocol/admin_client.py`
+- 参考：`E:/code/python/pyxxl/pyxxl/protocol/server.py`
 
 改造任务：
 
@@ -161,7 +161,7 @@
 
 - Python 在 `Executor._run()` 内直接 `await xxl_client.callback(...)`
 - 一旦 admin 不可用，回调失败风险直接暴露到任务结束路径
-- 参考：`E:/code/python/pyxxl/pyxxl/executor.py`
+- 参考：`E:/code/python/pyxxl/pyxxl/runtime/executor.py`
 
 改造任务：
 
@@ -202,7 +202,7 @@
 
 - Python `idleBeat` 仅通过 `job_id in self.tasks` 判断
 - 队列非空但当前刚切换状态时可能判断不准
-- 参考：`E:/code/python/pyxxl/pyxxl/server.py`
+- 参考：`E:/code/python/pyxxl/pyxxl/protocol/server.py`
 
 改造任务：
 
@@ -232,7 +232,7 @@
 
 - Python 当前没有等价去重集合
 - 同一调度日志可能被重复接受
-- 参考：`E:/code/python/pyxxl/pyxxl/executor.py`
+- 参考：`E:/code/python/pyxxl/pyxxl/runtime/executor.py`
 
 改造任务：
 
@@ -264,7 +264,7 @@
 
 - Python `cancel_job(include_queue=True)` 会直接丢弃队列任务，不回调
 - 当前测试也是按“不回调”写的
-- 参考：`E:/code/python/pyxxl/pyxxl/executor.py`
+- 参考：`E:/code/python/pyxxl/pyxxl/runtime/executor.py`
 
 改造任务：
 
@@ -294,7 +294,7 @@
 
 - Python 当前是：先把新任务塞队列，再异步 cancel 旧任务
 - 能工作，但时序不够明确，边界条件更多
-- 参考：`E:/code/python/pyxxl/pyxxl/executor.py`
+- 参考：`E:/code/python/pyxxl/pyxxl/runtime/executor.py`
 
 改造任务：
 
@@ -331,8 +331,8 @@
 当前现状：
 
 - Python `xxl_admin_baseurl` 是单字符串单地址
-- 参考：`E:/code/python/pyxxl/pyxxl/setting.py`
-- 参考：`E:/code/python/pyxxl/pyxxl/xxl_client.py`
+- 参考：`E:/code/python/pyxxl/pyxxl/config/executor.py`
+- 参考：`E:/code/python/pyxxl/pyxxl/protocol/admin_client.py`
 
 改造任务：
 
@@ -372,7 +372,7 @@
 
 - Python 用 `_register_task()` 每 10 秒注册一次
 - 停止阶段直接 `register_task.cancel()` 然后调用 `registryRemove`
-- 参考：`E:/code/python/pyxxl/pyxxl/main.py`
+- 参考：`E:/code/python/pyxxl/pyxxl/app/runner.py`
 
 改造任务：
 
@@ -404,7 +404,7 @@
 - Python sync handler 通过 `asyncio.to_thread()` 执行
 - 超时或取消后，只能通过 `cancel_event` 让业务代码自行配合
 - 若业务不配合，线程仍可能继续跑
-- 参考：`E:/code/python/pyxxl/pyxxl/executor.py`
+- 参考：`E:/code/python/pyxxl/pyxxl/runtime/executor.py`
 
 改造任务：
 
@@ -430,8 +430,8 @@
 
 - `main.py` 中赋值的是 `_successed_callback` / `_failed_callback`
 - `executor.py` 实际调用的是 `successed_callback` / `failed_callback`
-- 参考：`E:/code/python/pyxxl/pyxxl/main.py`
-- 参考：`E:/code/python/pyxxl/pyxxl/executor.py`
+- 参考：`E:/code/python/pyxxl/pyxxl/app/runner.py`
+- 参考：`E:/code/python/pyxxl/pyxxl/runtime/executor.py`
 
 改造任务：
 

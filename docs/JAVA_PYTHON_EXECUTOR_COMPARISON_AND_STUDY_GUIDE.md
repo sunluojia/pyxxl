@@ -30,13 +30,13 @@ Java 官方版本这三层拆得更明显。
 
 Python 当前版本虽然文件更少，但本质上也已经拆成了这三层：
 
-- 协议入口：`pyxxl/server.py`
-- 运行时核心：`pyxxl/executor.py`
-- 启动与生命周期：`pyxxl/main.py`
-- admin 客户端：`pyxxl/xxl_client.py`
-- 配置：`pyxxl/setting.py`
+- 协议入口：`pyxxl/protocol/server.py`
+- 运行时核心：`pyxxl/runtime/executor.py`
+- 启动与生命周期：`pyxxl/app/runner.py`
+- admin 客户端：`pyxxl/protocol/admin_client.py`
+- 配置：`pyxxl/config/executor.py`
 - 日志：`pyxxl/logger/*`
-- 指标：`pyxxl/prometheus.py`
+- 指标：`pyxxl/monitoring/prometheus.py`
 
 ---
 
@@ -44,16 +44,16 @@ Python 当前版本虽然文件更少，但本质上也已经拆成了这三层�
 
 | Java 官方 | 作用 | Python 当前对应 | 说明 |
 | --- | --- | --- | --- |
-| `XxlJobExecutor` | 执行器总入口，启动日志、admin 客户端、callback 线程、embed server | `pyxxl/main.py` 的 `PyxxlRunner`，配合 `ExecutorConfig` 和 `Executor` | Python 把启动装配拆到了 runner 和 config |
-| `EmbedServer` | 暴露 executor OpenAPI | `pyxxl/server.py` | Java 用 embed server，Python 用 aiohttp |
-| `ExecutorBizImpl` | `/beat` `/idleBeat` `/run` `/kill` `/log` 的业务实现 | `pyxxl/server.py` + `pyxxl/executor.py` | Python 把协议解析和运行时逻辑拆开了 |
-| `JobThread` | 每个 `jobId` 的运行线程、队列、去重、阻塞策略 | `pyxxl/executor.py` | Python 没有完全等价的 Thread，对应的是 `tasks + queue + _job_locks + _job_log_ids + _cover_replacements` |
-| `TriggerCallbackThread` | callback 队列、批量回调、失败补偿、启动恢复 | `pyxxl/executor.py` 里的 `CallbackManager` | 核心语义已对齐 |
-| `ExecutorRegistryThread` | 周期注册、停止时注销 | `pyxxl/main.py` 的 `_register_task()` + `pyxxl/xxl_client.py` | Python 仍是定时循环注册 |
+| `XxlJobExecutor` | 执行器总入口，启动日志、admin 客户端、callback 线程、embed server | `pyxxl/app/runner.py` 的 `PyxxlRunner`，配合 `ExecutorConfig` 和 `Executor` | Python 把启动装配拆到了 runner 和 config |
+| `EmbedServer` | 暴露 executor OpenAPI | `pyxxl/protocol/server.py` | Java 用 embed server，Python 用 aiohttp |
+| `ExecutorBizImpl` | `/beat` `/idleBeat` `/run` `/kill` `/log` 的业务实现 | `pyxxl/protocol/server.py` + `pyxxl/runtime/executor.py` | Python 把协议解析和运行时逻辑拆开了 |
+| `JobThread` | 每个 `jobId` 的运行线程、队列、去重、阻塞策略 | `pyxxl/runtime/executor.py` | Python 没有完全等价的 Thread，对应的是 `tasks + queue + _job_locks + _job_log_ids + _cover_replacements` |
+| `TriggerCallbackThread` | callback 队列、批量回调、失败补偿、启动恢复 | `pyxxl/runtime/callbacks.py` 里的 `CallbackManager` | 核心语义已对齐 |
+| `ExecutorRegistryThread` | 周期注册、停止时注销 | `pyxxl/app/runner.py` 的 `_register_task()` + `pyxxl/protocol/admin_client.py` | Python 仍是定时循环注册 |
 | `XxlJobFileAppender` | 任务日志落盘 | `pyxxl/logger/disk.py` | 目录结构还没完全对齐 Java |
 | `JobLogFileCleanThread` | 清理过期日志 | `LogBase.expired_loop()` + `DiskLog.expired_once()` | Python 已有清理循环 |
-| `AdminBiz` | executor 调 admin 的 client | `pyxxl/xxl_client.py` | Python 额外补了多 admin failover |
-| `XxlJobContext` / `XxlJobHelper` | 任务上下文、日志、分片参数 | `pyxxl.ctx.g` + `RunData` | Python 用上下文对象 `g` 暴露运行参数 |
+| `AdminBiz` | executor 调 admin 的 client | `pyxxl/protocol/admin_client.py` | Python 额外补了多 admin failover |
+| `XxlJobContext` / `XxlJobHelper` | 任务上下文、日志、分片参数 | `pyxxl.g` + `RunData` | Python 用上下文对象 `g` 暴露运行参数 |
 
 如果你只记最关键的 5 个映射：
 
@@ -72,13 +72,13 @@ Python 当前版本虽然文件更少，但本质上也已经拆成了这三层�
 推荐顺序：
 
 1. `example/executor_app.py`
-2. `pyxxl/setting.py`
-3. `pyxxl/main.py`
-4. `pyxxl/server.py`
-5. `pyxxl/executor.py`
-6. `pyxxl/xxl_client.py`
+2. `pyxxl/config/executor.py`
+3. `pyxxl/app/runner.py`
+4. `pyxxl/protocol/server.py`
+5. `pyxxl/runtime/executor.py`
+6. `pyxxl/protocol/admin_client.py`
 7. `pyxxl/logger/disk.py`
-8. `pyxxl/prometheus.py`
+8. `pyxxl/monitoring/prometheus.py`
 9. `pyxxl/tests/test_executor.py`
 10. `pyxxl/tests/api/test_server.py`
 
@@ -281,23 +281,23 @@ Java 官方 `/api/*` 只解决 executor 协议，不负责任务 CRUD。
 
 ## 9. 看 Python 代码时，应该如何理解每个文件
 
-### `pyxxl/setting.py`
+### `pyxxl/config/executor.py`
 
 配置项全貌、admin URL 归一化、executor 对外地址计算。
 
-### `pyxxl/main.py`
+### `pyxxl/app/runner.py`
 
 runner 如何组装 client、executor、log、metrics，以及如何启动和关闭。
 
-### `pyxxl/server.py`
+### `pyxxl/protocol/server.py`
 
 executor 对 admin 的协议面，包括 token 校验和 5 个 OpenAPI。
 
-### `pyxxl/executor.py`
+### `pyxxl/runtime/executor.py`
 
 这是最核心的文件：handler 注册、每个 `jobId` 的调度状态、阻塞策略、回调补偿、取消和关停。
 
-### `pyxxl/xxl_client.py`
+### `pyxxl/protocol/admin_client.py`
 
 admin 交互客户端：`registry`、`callback`、`registryRemove`、多 admin failover、HTTP 重试。
 
@@ -305,7 +305,7 @@ admin 交互客户端：`registry`、`callback`、`registryRemove`、多 admin f
 
 任务日志的存储和 `/log` 读取数据来源。
 
-### `pyxxl/prometheus.py`
+### `pyxxl/monitoring/prometheus.py`
 
 运行时指标和 Prometheus 暴露。
 
@@ -367,6 +367,8 @@ admin 交互客户端：`registry`、`callback`、`registryRemove`、多 admin f
 ---
 
 ## 11. 给公司爬虫二开时，正确的改造方向
+
+这一节描述的是“建议如何使用这个执行器去承载爬虫任务”，不是说执行器本身要内置 crawler 业务框架。
 
 如果目标是给公司爬虫长期接入，我建议按这个顺序推进。
 

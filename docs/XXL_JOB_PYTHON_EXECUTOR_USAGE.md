@@ -81,8 +81,7 @@ Python 执行器现在支持以下 admin 配置写法：
 import asyncio
 import json
 
-from pyxxl import ExecutorConfig, PyxxlRunner
-from pyxxl.ctx import g
+from pyxxl import ExecutorConfig, PyxxlRunner, g
 
 
 config = ExecutorConfig(
@@ -218,6 +217,42 @@ async def demo_job():
     ...
 ```
 
+### 执行模式装饰器
+
+在 Python 里这里更准确叫“装饰器”，不是 Java 的“注解”。
+
+当前建议把 handler 按执行模式显式声明：
+
+```python
+@app.register(name="asyncJob")
+async def async_job() -> str:
+    return "ok"
+
+
+@app.register(name="threadJob", mode="thread")
+def thread_job() -> str:
+    return "ok"
+
+
+@app.register(name="processJob", mode="process")
+def process_job() -> str:
+    return "ok"
+```
+
+建议使用规则：
+
+- `@app.register`：默认给 `async def`，也兼容老代码里的同步函数
+- `@app.register(..., mode="thread")`：明确进入线程池，适合短小同步任务
+- `@app.register(..., mode="process")`：明确进入子进程，适合浏览器驱动、长阻塞采集、需要强制终止的任务
+- 也兼容 `@app.register("processJob", "process")` 这种两参数形式
+- `@app.register_thread`、`@app.register_process` 仍然保留，作为兼容快捷写法
+
+`process` 模式限制：
+
+- 必须是模块级顶层函数
+- 不支持局部函数、闭包函数
+- 不支持 `async def`
+
 那 admin 上就要填：
 
 - `JobHandler = demoJobHandler`
@@ -261,6 +296,8 @@ async def demo_job():
 
 ## 7. 推荐的爬虫接入方式
 
+这一节是“使用建议”，不是执行器内置的 crawler 框架能力。
+
 如果目标是“方便公司爬虫接入”，不建议把每个爬虫函数都直接暴露成一个 XXL-JOB handler。更稳妥的做法是固定少量 handler，再由 handler 内部分发。
 
 建议保留少量固定入口：
@@ -292,7 +329,7 @@ async def demo_job():
 ```python
 import json
 
-from pyxxl.ctx import g
+from pyxxl import g
 
 
 TASKS = {}
@@ -332,7 +369,7 @@ Python 当前行为：
 ```python
 import time
 
-from pyxxl.ctx import g
+from pyxxl import g
 
 
 @app.register(name="sync_demo")
