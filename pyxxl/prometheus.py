@@ -26,6 +26,8 @@ routes = web.RouteTableDef()
 
 
 def success() -> None:
+    # Read jobId from task-local context so metrics stay attached to the trigger
+    # currently executing on this coroutine.
     SUCCESS_COUNTER.labels(g.xxl_run_data.jobId).inc(1)
 
 
@@ -40,6 +42,7 @@ def as_str_dict(obj: Any) -> dict:
 
 
 def _get_thread_pool_info(pool: ThreadPoolExecutor) -> dict:
+    # Prometheus Info metrics serialize arbitrary key/value metadata as strings.
     data = {}
     data["wait_qsize"] = str(pool._work_queue.qsize())
     data["current_threads"] = str(len(pool._threads))
@@ -50,11 +53,10 @@ def _get_thread_pool_info(pool: ThreadPoolExecutor) -> dict:
 
 @routes.get("/metrics")
 async def metrics(request: web.Request) -> web.Response:
-    # init
+    # Rebuild point-in-time gauges on each scrape from current executor state.
     RUNNING_TASK_INFO.clear()
     QUEUE_TASKS_INFO.clear()
     ASYNCIO_TASKS_TOTAL.set(len(asyncio.all_tasks()))
-    # export executor info
     executor: Executor = request.app["pyxxl_state"].executor
     RUNNING_TASKS.set(len(executor.tasks))
 
@@ -64,7 +66,6 @@ async def metrics(request: web.Request) -> web.Response:
     for kk, queue in executor.queue.items():
         QUEUE_TASKS.labels(kk).set(queue.qsize())
         QUEUE_TASKS_INFO.labels(kk).info({"detail": str(queue)})
-    # thread pool
     THREAD_POOL_INFO.info(_get_thread_pool_info(executor.thread_pool))
 
     params = request.query

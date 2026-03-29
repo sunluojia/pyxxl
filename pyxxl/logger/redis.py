@@ -22,6 +22,8 @@ KEY_PREFIX = "pyxxl:log:{app}:{log_id}"
 
 
 class RedisHandler(logging.Handler):
+    """Redis list-backed log handler with bounded tail retention."""
+
     terminator = "\n"
 
     def __init__(
@@ -43,6 +45,7 @@ class RedisHandler(logging.Handler):
         try:
             xxl_kwargs = g.try_get_run_data()
             record.logId = xxl_kwargs.logId if xxl_kwargs else "NotInTask"
+            # Use a pipeline so append/trim/expire stay consistent for one log write.
             p = self.rclient.pipeline()
             p.rpush(self.key, self.format(record) + self.terminator)
             p.ltrim(self.key, -self.max_lines, -1)
@@ -53,6 +56,8 @@ class RedisHandler(logging.Handler):
 
 
 class RedisLog(LogBase):
+    """Redis-backed task log storage for multi-instance or ephemeral executors."""
+
     def __init__(
         self,
         app: str,
@@ -94,7 +99,7 @@ class RedisLog(LogBase):
 
     async def read_task_logs(self, log_id: int, *, key: Optional[str] = None) -> str:
         key = key or self.key(log_id)
-        # todo: use async
+        # redis-py is synchronous, so this remains a P1 optimization target.
         return "".join(i.decode() for i in self.rclient.lrange(key, 0, -1))
 
     async def get_logs(self, request: LogRequest, *, key: Optional[str] = None) -> LogResponse:
@@ -106,7 +111,7 @@ class RedisLog(LogBase):
             logs = "No such logid logs." if llen == 0 else ""
             to_line_num = request["fromLineNum"]
         else:
-            # lrange 0 20   [0, 20]
+            # Redis LRANGE end index is inclusive, unlike Python slices.
             logs = "".join(i.decode() for i in self.rclient.lrange(key, from_line, to_line - 1))
             to_line_num = to_line
 

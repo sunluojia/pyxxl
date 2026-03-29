@@ -7,14 +7,19 @@ from pyxxl.xxl_client import XXL
 
 @pytest.mark.asyncio
 async def test_param_admin_url():
-    XXL("http://localhost:8080/xxl-job-admin/api/")
-    XXL("https://localhost:8080/xxl-job-admin/api/")
+    # Accept the admin URL variants users commonly paste into config.
+    clients = [
+        XXL("http://localhost:8080/xxl-job-admin/api/"),
+        XXL("https://localhost:8080/xxl-job-admin/api/"),
+        XXL("http://localhost:8080/xxl-job-admin"),
+        XXL("http://localhost:8080/xxl-job-admin/api"),
+        XXL("http://localhost:8080/xxl-job-admin,http://127.0.0.1:8081/xxl-job-admin/api"),
+    ]
+    for client in clients:
+        await client.close()
 
     with pytest.raises(ValueError):
         XXL("htp://localhost:8080/xxl-job-admin/api/")
-
-    with pytest.raises(ValueError):
-        XXL("http://localhost:8080/xxl-job-admin/api")
 
 
 @pytest.mark.asyncio
@@ -43,3 +48,57 @@ async def test_client(aiohttp_client: AiohttpClient) -> None:
     assert not (await xxl_client.registry("status_test", "value"))
     # callback
     await xxl_client.callback(123, 123123123)
+    await xxl_client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_multi_admin_failover(aiohttp_client: AiohttpClient, unused_tcp_port_factory) -> None:
+    # Requests should fail over in order and stop at the first reachable admin.
+    calls = []
+
+    async def ok_registry_api(request: web.Request):
+        calls.append(("registry", await request.json()))
+        return web.json_response({"code": 200, "msg": "1"})
+
+    async def ok_registry_remove_api(request: web.Request):
+        calls.append(("registryRemove", await request.json()))
+        return web.json_response({"code": 200, "msg": "1"})
+
+    async def ok_callback_api(request: web.Request):
+        calls.append(("callback", await request.json()))
+        return web.json_response({"code": 200, "msg": "1"})
+
+    app = web.Application()
+    app.router.add_post("/xxl-job-admin/api/registry", ok_registry_api)
+    app.router.add_post("/xxl-job-admin/api/registryRemove", ok_registry_remove_api)
+    app.router.add_post("/xxl-job-admin/api/callback", ok_callback_api)
+    session = await aiohttp_client(app)
+    unavailable_url = f"http://127.0.0.1:{unused_tcp_port_factory()}/xxl-job-admin"
+    available_url = str(session.make_url("/xxl-job-admin"))
+    xxl_client = XXL([unavailable_url, available_url], retry_times=1)
+
+    assert await xxl_client.registry("key", "value")
+    await xxl_client.callback(123, 123123123, code=200, msg="ok")
+    await xxl_client.registryRemove("key", "value")
+    await xxl_client.close()
+
+    assert calls[0] == (
+        "registry",
+        {"registryGroup": "EXECUTOR", "registryKey": "key", "registryValue": "value"},
+    )
+    assert calls[1] == (
+        "callback",
+        [
+            {
+                "logId": 123,
+                "logDateTim": 123123123,
+                "handleCode": 200,
+                "handleMsg": "ok",
+                "executeResult": {"code": 200, "msg": "ok"},
+            }
+        ],
+    )
+    assert calls[2] == (
+        "registryRemove",
+        {"registryGroup": "EXECUTOR", "registryKey": "key", "registryValue": "value"},
+    )

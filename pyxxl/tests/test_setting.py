@@ -1,4 +1,3 @@
-import os
 from urllib.parse import urlparse
 
 import pytest
@@ -9,7 +8,7 @@ from pyxxl.utils import get_network_ip
 TEST_ADMIN_URL = "http://localhost:8080/xxl-job-admin/api/"
 
 
-def test_config():
+def test_config(monkeypatch):
     setting = ExecutorConfig(
         xxl_admin_baseurl=TEST_ADMIN_URL,
         executor_app_name="test",
@@ -30,10 +29,10 @@ def test_config():
     assert setting.executor_app_name == "test"
 
     # from env
-    os.environ["executor_app_name"] = "fromenv"
-    os.environ["XXL_ADMIN_BASEURL"] = TEST_ADMIN_URL
-    os.environ["GRACEFUL_TIMEOUT"] = "500"
-    os.environ["GRACEFUL_CLOSE"] = "False"
+    monkeypatch.setenv("executor_app_name", "fromenv")
+    monkeypatch.setenv("XXL_ADMIN_BASEURL", TEST_ADMIN_URL)
+    monkeypatch.setenv("GRACEFUL_TIMEOUT", "500")
+    monkeypatch.setenv("GRACEFUL_CLOSE", "False")
 
     setting = ExecutorConfig(
         xxl_admin_baseurl="",
@@ -44,7 +43,19 @@ def test_config():
     assert setting.xxl_admin_baseurl == TEST_ADMIN_URL
     assert setting.graceful_timeout == 500
     assert setting.graceful_close is False
-    os.environ.clear()
+
+
+def test_multi_admin_config():
+    setting = ExecutorConfig(
+        xxl_admin_baseurl="http://localhost:8080/xxl-job-admin,http://127.0.0.1:9090/xxl-job-admin/api",
+        executor_app_name="test",
+        dotenv_try=False,
+    )
+    assert setting.admin_baseurls == [
+        "http://localhost:8080/xxl-job-admin/api/",
+        "http://127.0.0.1:9090/xxl-job-admin/api/",
+    ]
+    assert setting.xxl_admin_baseurl == ",".join(setting.admin_baseurls)
 
 
 @pytest.mark.parametrize(

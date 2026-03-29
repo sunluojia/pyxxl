@@ -23,7 +23,7 @@ class ExecutorConfig:
     """
 
     xxl_admin_baseurl: str
-    """xxl-admin服务端暴露的restful接口url(如http://localhost:8080/xxl-job-admin/api/). 必填"""
+    """xxl-admin服务端暴露的restful接口url. 支持逗号分隔多地址,支持根地址或/api地址. 必填"""
     executor_app_name: str
     """xxl-admin上定义的执行器名称,必须一致否则无法注册(如xxl-job-executor-sample). 必填"""
     access_token: Optional[str] = None
@@ -138,9 +138,29 @@ class ExecutorConfig:
                 setattr(self, param.name, real_value)
 
     def _valid_xxl_admin_baseurl(self) -> None:
-        _admin_url = urlparse(self.xxl_admin_baseurl)
-        if not (_admin_url.scheme.startswith("http") and _admin_url.path.endswith("/")):
+        # Normalize once at config load time so the rest of the runtime can work
+        # with a single canonical /api/ representation.
+        admin_urls = [self._normalize_admin_baseurl(url) for url in self._split_admin_baseurls(self.xxl_admin_baseurl)]
+        if not admin_urls:
             raise ValueError("admin_url must like http://localhost:8080/xxl-job-admin/api/")
+        self.xxl_admin_baseurl = ",".join(admin_urls)
+
+    def _split_admin_baseurls(self, raw_value: str) -> list[str]:
+        return [url.strip() for url in raw_value.split(",") if url.strip()]
+
+    def _normalize_admin_baseurl(self, raw_value: str) -> str:
+        # Accept config copied from browser/admin docs regardless of whether the
+        # user pasted the root URL, /api or /api/.
+        admin_url = urlparse(raw_value.strip())
+        if not admin_url.scheme.startswith("http"):
+            raise ValueError("admin_url must like http://localhost:8080/xxl-job-admin/api/")
+
+        path = admin_url.path.rstrip("/")
+        if path.endswith("/api"):
+            normalized_path = f"{path}/"
+        else:
+            normalized_path = f"{path}/api/" if path else "/api/"
+        return admin_url._replace(path=normalized_path).geturl()
 
     def _valid_executor_app_name(self) -> None:
         if not self.executor_app_name:
@@ -155,5 +175,10 @@ class ExecutorConfig:
 
     @property
     def executor_baseurl(self) -> str:
-        """暴露给xxl-admin的地址"""
+        """Address published to xxl-job-admin for callbacks into this executor."""
         return self.executor_url
+
+    @property
+    def admin_baseurls(self) -> list[str]:
+        """Normalized admin base URLs in failover order."""
+        return self._split_admin_baseurls(self.xxl_admin_baseurl)

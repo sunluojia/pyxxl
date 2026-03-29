@@ -8,6 +8,9 @@ from pyxxl.schema import RunData
 
 @pytest.mark.asyncio
 async def test_runner_callback(executor: Executor):
+    executor.reset_handler()
+    executor.xxl_client.clear_result()
+
     @executor.handler.register
     async def test_ctx():
         logId = g.xxl_run_data.logId

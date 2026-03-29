@@ -26,6 +26,9 @@
 * 所有阻塞策略的支持
 * 异步支持（推荐）
 * job-admin上查看日志
+* 多 admin 地址 failover
+* callback 异步补偿与启动恢复
+* access token 校验与 metrics 指标
 
 ## 已经测试过的XXL-JOB版本
 
@@ -54,7 +57,8 @@ import asyncio
 from pyxxl import ExecutorConfig, PyxxlRunner
 
 config = ExecutorConfig(
-    xxl_admin_baseurl="http://localhost:8080/xxl-job-admin/api/",
+    # 支持单地址、逗号分隔多地址，支持填写根地址或 /api 地址
+    xxl_admin_baseurl="http://localhost:8080/xxl-job-admin",
     executor_app_name="xxl-job-executor-sample"
 )
 
@@ -76,6 +80,9 @@ app.run_executor()
 
 
 更多示例和接口文档请参考 [PYXXL文档](https://fcfangcc.github.io/pyxxl/latest/example/) ，具体代码在example文件夹下面
+
+本地中文使用文档见 [docs/XXL_JOB_PYTHON_EXECUTOR_USAGE.md](docs/XXL_JOB_PYTHON_EXECUTOR_USAGE.md)
+Java 官方对照与学习文档见 [docs/JAVA_PYTHON_EXECUTOR_COMPARISON_AND_STUDY_GUIDE.md](docs/JAVA_PYTHON_EXECUTOR_COMPARISON_AND_STUDY_GUIDE.md)
 
 如果executor服务无法直连xxl-admin，请参考[PYXXL配置](https://fcfangcc.github.io/pyxxl/latest/apis/config/)修改executor_listen_host
 

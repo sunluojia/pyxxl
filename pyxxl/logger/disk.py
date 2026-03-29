@@ -23,6 +23,8 @@ MAX_LOG_TAIL_LINES = 1000
 
 
 class DiskLog(LogBase):
+    """Disk-backed task log storage used by the executor /log endpoint."""
+
     def __init__(
         self,
         log_path: str,
@@ -54,7 +56,8 @@ class DiskLog(LogBase):
         return logger
 
     async def get_logs(self, request: LogRequest, *, key: Optional[str] = None) -> LogResponse:
-        # todo: 优化获取中间行的逻辑，缓存之前每行日志的大小然后直接seek
+        # Keep line-based pagination compatible with xxl-job-admin even though it
+        # is less efficient than offset-based reads for very large files.
         logs = ""
         to_line_num = request["fromLineNum"]  # start with 1
         is_end = False
@@ -133,7 +136,7 @@ class DiskLog(LogBase):
             yield handler
 
     def after_running(self, logger: logging.Logger) -> None:
-        # !!! StreamHandler remove会有问题，需要判断是否是FileHandler
+        # Keep stdout handlers alive; only close the per-task file handles.
         file_handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
         for fh in file_handlers:
             logger.debug("close file log object: {}.".format(fh))

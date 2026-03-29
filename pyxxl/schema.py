@@ -35,5 +35,7 @@ class RunData:
 
     @classmethod
     def from_dict(cls, data: dict) -> "RunData":
+        # Ignore unknown keys so the executor tolerates minor payload additions
+        # across xxl-job versions without failing deserialization.
         class_fields = {f.name for f in fields(cls)}
         return RunData(**{k: v for k, v in data.items() if k in class_fields})

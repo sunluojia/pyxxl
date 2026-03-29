@@ -1,13 +1,17 @@
 import asyncio
 import time
+from pathlib import Path
 from typing import Iterator
 
 import pytest
 
+from pyxxl import ExecutorConfig
 from pyxxl.enum import executorBlockStrategy
 from pyxxl.error import JobDuplicateError, JobNotFoundError, JobParamsError
-from pyxxl.executor import Executor, JobHandler
+from pyxxl.executor import CallbackRequest, Executor, JobHandler
 from pyxxl.schema import RunData
+from pyxxl.tests.conftest import GLOBAL_CONFIG
+from pyxxl.tests.utils import MokeXXL
 
 job_handler = JobHandler()
 TASK_SLEEP_SECONDS = 2
@@ -84,6 +88,68 @@ async def test_runner_callback(executor: Executor, handler_name: str):
 
 
 @pytest.mark.asyncio
+async def test_runner_callback_retry(executor: Executor, job_id: int, log_id: int):
+    # Callback delivery should be retried out of band and eventually succeed once
+    # admin connectivity comes back.
+    executor.reset_handler(job_handler)
+    executor.xxl_client.clear_result()
+    executor.callback_manager.retry_interval = 0.3
+    executor.xxl_client.set_callback_failures(log_id, 1)
+
+    await executor.run_job(
+        RunData(
+            logId=log_id,
+            jobId=job_id,
+            executorHandler="pytest_executor_async",
+            executorBlockStrategy=executorBlockStrategy.SERIAL_EXECUTION.value,
+        )
+    )
+
+    await asyncio.sleep(TASK_SLEEP_SECONDS + 0.1)
+    assert not await executor.is_running(job_id)
+    assert executor.xxl_client.callback_result.get(log_id) is None
+
+    await executor.graceful_close(10)
+    assert executor.xxl_client.callback_result.get(log_id) == 200
+    assert executor.xxl_client.callback_attempts.get(log_id) == 2
+
+
+@pytest.mark.asyncio
+async def test_runner_callback_replay_from_persisted_file(tmp_path: Path, log_id: int):
+    # Persisted callback records must survive process restart, mirroring Java's
+    # callback compensation behavior.
+    config = ExecutorConfig(**GLOBAL_CONFIG, log_local_dir=tmp_path.as_posix())
+    callback_store = tmp_path.joinpath(".callback_failures")
+
+    first_client = MokeXXL("http://localhost:8080/xxl-job-admin/api/")
+    first_executor = Executor(first_client, config, handler=job_handler)
+    await first_executor.start_callback_manager()
+    first_executor.callback_manager.retry_interval = 30
+    first_client.set_callback_failures(log_id, 1)
+
+    await first_executor.callback_manager.enqueue(
+        CallbackRequest(log_id=log_id, timestamp=123456789, code=200, msg="persist-me")
+    )
+    await asyncio.sleep(0.1)
+    await first_executor.stop_callback_manager(timeout=0.01, close=True)
+    await first_executor.xxl_client.close()
+
+    persisted_files = list(callback_store.glob("callback-*.json"))
+    assert len(persisted_files) == 1
+
+    second_client = MokeXXL("http://localhost:8080/xxl-job-admin/api/")
+    second_executor = Executor(second_client, config, handler=job_handler)
+    await second_executor.start_callback_manager()
+    await second_executor.stop_callback_manager(timeout=5)
+
+    assert second_client.callback_result.get(log_id) == 200
+    assert second_client.callback_messages.get(log_id) == "persist-me"
+    assert not list(callback_store.glob("callback-*.json"))
+    await second_executor.stop_callback_manager(timeout=1, close=True)
+    await second_executor.xxl_client.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("handler_name", HANDLER_NAMES)
 async def test_runner_cancel(executor: Executor, handler_name: str):
     executor.reset_handler(job_handler)
@@ -119,7 +185,33 @@ async def test_runner_cancel_include_queue(
     await executor.cancel_job(job_id, include_queue=True)
     await executor.graceful_close(10)
     assert executor.xxl_client.callback_result.get(cancel_log_id) == 500
-    assert executor.xxl_client.callback_result.get(queue_log_id) is None
+    assert executor.xxl_client.callback_result.get(queue_log_id) == 500
+    assert "job not executed" in executor.xxl_client.callback_messages.get(queue_log_id)
+
+
+@pytest.mark.asyncio
+async def test_runner_shutdown_include_queue_callback(executor: Executor, job_id: int, log_id_iter: Iterator[int]):
+    # Shutdown should close the state loop: both running and queued triggers need
+    # a terminal callback instead of being silently dropped.
+    executor.reset_handler(job_handler)
+    executor.xxl_client.clear_result()
+    running_log_id, queue_log_id = next(log_id_iter), next(log_id_iter)
+    base_data = dict(
+        jobId=job_id,
+        executorHandler=HANDLER_NAMES[0],
+        executorBlockStrategy=executorBlockStrategy.SERIAL_EXECUTION.value,
+    )
+
+    await executor.run_job(RunData(logId=running_log_id, **base_data))
+    await executor.run_job(RunData(logId=queue_log_id, **base_data))
+
+    await executor.shutdown()
+    await executor.stop_callback_manager(timeout=10)
+
+    assert executor.xxl_client.callback_result.get(running_log_id) == 500
+    assert executor.xxl_client.callback_result.get(queue_log_id) == 500
+    assert "executor shutdown." in executor.xxl_client.callback_messages.get(running_log_id)
+    assert "job not executed" in executor.xxl_client.callback_messages.get(queue_log_id)
 
 
 @pytest.mark.asyncio
@@ -150,6 +242,46 @@ async def test_runner_SERIAL_EXECUTION(executor: Executor, job_id: int, handler_
         await executor.run_job(RunData(logId=next(log_id_iter), **run_data))
 
     await executor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_runner_duplicate_log_id_dedup(executor: Executor, job_id: int, log_id: int):
+    # Same jobId + logId must be treated as the same execution and rejected.
+    executor.reset_handler(job_handler)
+    executor.xxl_client.clear_result()
+    run_data = RunData(
+        logId=log_id,
+        jobId=job_id,
+        executorHandler=HANDLER_NAMES[0],
+        executorBlockStrategy=executorBlockStrategy.SERIAL_EXECUTION.value,
+    )
+
+    await executor.run_job(run_data)
+    with pytest.raises(JobDuplicateError, match="repeate trigger job"):
+        await executor.run_job(run_data)
+
+    await executor.graceful_close(10)
+    assert executor.xxl_client.callback_result.get(log_id) == 200
+    assert executor.xxl_client.callback_attempts.get(log_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_is_running_or_has_queue(executor: Executor, job_id: int, log_id: int):
+    # idleBeat/BUSYOVER semantics are queue-aware, not only running-task aware.
+    executor.reset_handler(job_handler)
+    queued = RunData(
+        logId=log_id,
+        jobId=job_id,
+        executorHandler=HANDLER_NAMES[0],
+        executorBlockStrategy=executorBlockStrategy.SERIAL_EXECUTION.value,
+    )
+
+    await executor.get_queue(job_id).put(queued)
+    assert not await executor.is_running(job_id)
+    assert await executor.is_running_or_has_queue(job_id)
+
+    await executor.cancel_job(job_id, include_queue=True, reason="pytest cleanup.")
+    await executor.stop_callback_manager(timeout=5)
 
 
 @pytest.mark.asyncio
@@ -187,6 +319,87 @@ async def test_runner_COVER_EARLY(executor: Executor, job_id: int, handler_name:
     await executor.graceful_close(10)
     assert executor.xxl_client.callback_result.get(ok_log_id) == 200
     assert executor.xxl_client.callback_result.get(error_log_id) == 500
+
+
+@pytest.mark.asyncio
+async def test_runner_cover_early_replaces_queue(executor: Executor, job_id: int, log_id_iter: Iterator[int]):
+    # COVER_EARLY should cancel the current run, discard queued work, and only
+    # keep the latest trigger as the replacement.
+    executor.reset_handler(job_handler)
+    executor.xxl_client.clear_result()
+    running_log_id, queued_log_id, cover_log_id = [next(log_id_iter) for _ in range(3)]
+
+    await executor.run_job(
+        RunData(
+            logId=running_log_id,
+            jobId=job_id,
+            executorHandler="pytest_executor_async",
+            executorBlockStrategy=executorBlockStrategy.SERIAL_EXECUTION.value,
+        )
+    )
+    await executor.run_job(
+        RunData(
+            logId=queued_log_id,
+            jobId=job_id,
+            executorHandler="pytest_executor_async",
+            executorBlockStrategy=executorBlockStrategy.SERIAL_EXECUTION.value,
+        )
+    )
+    await executor.run_job(
+        RunData(
+            logId=cover_log_id,
+            jobId=job_id,
+            executorHandler="pytest_executor_async",
+            executorBlockStrategy=executorBlockStrategy.COVER_EARLY.value,
+        )
+    )
+
+    await executor.graceful_close(10)
+    assert executor.xxl_client.callback_result.get(running_log_id) == 500
+    assert executor.xxl_client.callback_result.get(queued_log_id) == 500
+    assert executor.xxl_client.callback_result.get(cover_log_id) == 200
+    assert "block strategy effect" in executor.xxl_client.callback_messages.get(running_log_id)
+    assert "job not executed" in executor.xxl_client.callback_messages.get(queued_log_id)
+
+
+@pytest.mark.asyncio
+async def test_runner_cover_early_only_latest_runs(executor: Executor, job_id: int, log_id_iter: Iterator[int]):
+    # Multiple COVER_EARLY triggers should collapse into one final execution.
+    executor.reset_handler(job_handler)
+    executor.xxl_client.clear_result()
+    first_log_id, middle_log_id, last_log_id = [next(log_id_iter) for _ in range(3)]
+
+    await executor.run_job(
+        RunData(
+            logId=first_log_id,
+            jobId=job_id,
+            executorHandler="pytest_executor_async",
+            executorBlockStrategy=executorBlockStrategy.COVER_EARLY.value,
+        )
+    )
+    await executor.run_job(
+        RunData(
+            logId=middle_log_id,
+            jobId=job_id,
+            executorHandler="pytest_executor_async",
+            executorBlockStrategy=executorBlockStrategy.COVER_EARLY.value,
+        )
+    )
+    await executor.run_job(
+        RunData(
+            logId=last_log_id,
+            jobId=job_id,
+            executorHandler="pytest_executor_async",
+            executorBlockStrategy=executorBlockStrategy.COVER_EARLY.value,
+        )
+    )
+
+    await executor.graceful_close(10)
+    assert executor.xxl_client.callback_result.get(first_log_id) == 500
+    assert executor.xxl_client.callback_result.get(middle_log_id) == 500
+    assert executor.xxl_client.callback_result.get(last_log_id) == 200
+    assert "block strategy effect" in executor.xxl_client.callback_messages.get(first_log_id)
+    assert "job not executed" in executor.xxl_client.callback_messages.get(middle_log_id)
 
 
 @pytest.mark.asyncio
@@ -233,7 +446,7 @@ async def test_sync_timeout(executor: Executor, job_id: int, log_id: int):
 
 @pytest.mark.asyncio
 async def test_many_jobs_running(executor: Executor, job_id: int, log_id_iter: Iterator[int]):
-    """测试多个jobId的任务同时运行，确保它们之间不会互相影响"""
+    """Different jobIds should schedule independently under per-job locks."""
     executor.reset_handler(job_handler)
     executor.xxl_client.clear_result()
 

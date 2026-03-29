@@ -53,8 +53,12 @@ def event_loop() -> Generator:
     ],
     ids=["disk", "redis"],
 )
-def executor(request: Any) -> Executor:
-    return Executor(MokeXXL("http://localhost:8080/xxl-job-admin/api/"), request.param, handler=None)
+def executor(request: Any, event_loop: Generator) -> Generator[Executor, None, None]:
+    instance = Executor(MokeXXL("http://localhost:8080/xxl-job-admin/api/"), request.param, handler=None)
+    event_loop.run_until_complete(instance.start_callback_manager())
+    yield instance
+    event_loop.run_until_complete(instance.stop_callback_manager(timeout=1, close=True))
+    event_loop.run_until_complete(instance.xxl_client.close())
 
 
 @pytest.fixture(scope="session")

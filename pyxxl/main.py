@@ -17,10 +17,28 @@ if try_import("prometheus_client"):
     from pyxxl import prometheus
 
     class Executor(executor.Executor):
+        """Executor subclass that wires runtime callbacks into Prometheus metrics."""
+
         def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__(*args, **kwargs)
-            self._successed_callback = prometheus.success
-            self._failed_callback = prometheus.failed
+            user_successed_callback = kwargs.pop("successed_callback", None)
+            user_failed_callback = kwargs.pop("failed_callback", None)
+
+            def successed_callback() -> None:
+                prometheus.success()
+                if user_successed_callback is not None:
+                    user_successed_callback()
+
+            def failed_callback(reason: str) -> None:
+                prometheus.failed(reason)
+                if user_failed_callback is not None:
+                    user_failed_callback(reason)
+
+            super().__init__(
+                *args,
+                successed_callback=successed_callback,
+                failed_callback=failed_callback,
+                **kwargs,
+            )
 
 else:
 
@@ -28,6 +46,7 @@ else:
 
 
 async def server_info_ctx(app: web.Application) -> AsyncGenerator:
+    """Log executor process lifecycle for easier deployment diagnostics."""
     pid = os.getpid()
     state: State = app["pyxxl_state"]
     state.executor_logger.info(f"start executor server with pid {pid}.")
@@ -51,31 +70,15 @@ class PyxxlRunner:
         config: ExecutorConfig,
         handler: Optional[executor.JobHandler] = None,
     ):
-        """
-        !!! example
-
-            ```python
-            runner = PyxxlRunner(
-                ExecutorConfig(
-                    xxl_admin_baseurl="http://localhost:8080/xxl-job-admin/api/",
-                    executor_app_name="xxl-job-executor-sample",
-                    )
-                ,
-                handler=xxl_handler,
-            )
-            ```
-        Args:
-            config (ExecutorConfig): 配置参数
-            handler (JobHandler, optional): 执行器支持的job,没有预先定义的job名称也会执行失败
-        """
+        """High-level runner that binds config, HTTP app, logs and lifecycle."""
 
         self.handler = handler or executor.JobHandler(logger=config.executor_logger)
         self.config = config
         self.log_level = logging.DEBUG if self.config.debug else logging.INFO
 
     async def _register_task(self, xxl_client: XXL) -> None:
-        # todo: 这是个调度器的bug，必须循环去注册，不然会显示为离线
-        # https://github.com/xuxueli/xxl-job/issues/2090
+        # Keep re-registering like the Java executor registry thread. This also
+        # works around admin-side offline display issues in some versions.
         try:
             while True:
                 await xxl_client.registry(self.config.executor_app_name, self.config.executor_baseurl)
@@ -84,9 +87,9 @@ class PyxxlRunner:
             self.config.executor_logger.warning("Register task is exit.")
 
     def _get_xxl_clint(self) -> XXL:
-        """for moke"""
+        """Create the admin client from normalized config values."""
         return XXL(
-            self.config.xxl_admin_baseurl,
+            self.config.admin_baseurls,
             token=self.config.access_token,
             logger=self.config.executor_logger,
             retry_times=self.config.http_retry_times,
@@ -129,6 +132,7 @@ class PyxxlRunner:
             executor_logger=self.config.executor_logger,
         )
         app["pyxxl_state"] = state
+        await state.executor.start_callback_manager()
         executor_log_task = asyncio.create_task(
             state.task_log.expired_loop(self.config.log_clean_interval), name="log_task"
         )
@@ -142,16 +146,23 @@ class PyxxlRunner:
 
         register_task.cancel()
         executor_log_task.cancel()
+        # Remove registry before closing transports so admin stops dispatching to
+        # an executor that is already in the shutdown path.
         await state.xxl_client.registryRemove(self.config.executor_app_name, self.config.executor_baseurl)
         if self.config.graceful_close:
             await state.executor.graceful_close(self.config.graceful_timeout)
         else:
             await state.executor.shutdown()
+            await state.executor.stop_callback_manager(timeout=1, close=True)
+        if self.config.graceful_close:
+            # graceful_close waits for in-flight callbacks, but a final close pass
+            # still marks the callback manager closed for any late shutdown path.
+            await state.executor.stop_callback_manager(timeout=1, close=True)
         await state.xxl_client.close()
         state.executor_logger.info("cleanup executor success.")
 
     def create_server_app(self) -> web.Application:
-        """获取执行器的app对象,可以使用自己喜欢的服务器启动这个webapp"""
+        """Build the aiohttp application with executor cleanup contexts attached."""
         app = create_app()
         app.cleanup_ctx.append(self._cleanup_ctx)
         app.cleanup_ctx.append(server_info_ctx)
@@ -162,7 +173,7 @@ class PyxxlRunner:
             setup_logging(self.config.executor_log_path, "pyxxl", level=self.log_level)
 
     def run_executor(self, handle_signals: bool = True) -> None:
-        """用aiohttp的web服务器启动执行器"""
+        """Start the embedded aiohttp executor server."""
         self._setup_logging()
         web.run_app(
             self.create_server_app(),
@@ -175,7 +186,7 @@ class PyxxlRunner:
         self.run_executor(handle_signals=True)
 
     def run_with_daemon(self) -> None:
-        """新开一个进程以后台方式运行,一般和gunicorn一起使用"""
+        """Start the executor in a detached child process."""
 
         daemon = Process(target=self._runner, name="pyxxljob", daemon=True)
         daemon.start()
@@ -184,7 +195,3 @@ class PyxxlRunner:
     @property
     def register(self) -> Any:
         return self.handler.register
-
-    # def exit_daemon(self):
-    #     logger.info("Exit daemon name=%s", self.daemon.name )
-    #     self.daemon.terminate()
