@@ -2,7 +2,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from pyxxl.setting import ExecutorConfig
+from pyxxl import ExecutorConfig
 from pyxxl.utils import get_network_ip
 
 TEST_ADMIN_URL = "http://localhost:8080/xxl-job-admin/api/"
@@ -17,7 +17,7 @@ def test_config(monkeypatch):
     assert urlparse(setting.executor_url).hostname == get_network_ip()
     assert setting.executor_app_name == "test"
 
-    # like nginx proxy
+    # 模拟 Nginx 代理转发场景
     setting = ExecutorConfig(
         xxl_admin_baseurl=TEST_ADMIN_URL,
         executor_app_name="test",
@@ -28,7 +28,7 @@ def test_config(monkeypatch):
     assert setting.executor_listen_host == get_network_ip()
     assert setting.executor_app_name == "test"
 
-    # from env
+    # 从环境变量读取配置
     monkeypatch.setenv("executor_app_name", "fromenv")
     monkeypatch.setenv("XXL_ADMIN_BASEURL", TEST_ADMIN_URL)
     monkeypatch.setenv("GRACEFUL_TIMEOUT", "500")

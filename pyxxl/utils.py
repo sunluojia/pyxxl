@@ -17,7 +17,7 @@ DEFAULT_BACKUP_FILE_COUNT = 5
 def get_network_ip() -> str:
     """获取本机地址,会获取首个网络地址"""
     if platform.system() == "Darwin":
-        return "127.0.0.1"  # todo
+        return "127.0.0.1"  # macOS 开发环境下优先回落到本机回环地址
     else:
         _, _, ipaddrlist = socket.gethostbyname_ex(socket.gethostname())
     return ipaddrlist[0]

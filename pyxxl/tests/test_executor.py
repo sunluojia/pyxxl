@@ -5,13 +5,12 @@ from typing import Iterator
 
 import pytest
 
-from pyxxl import ExecutorConfig
-from pyxxl.enum import executorBlockStrategy
+from pyxxl import CallbackRequest, Executor, ExecutorBlockStrategy, ExecutorConfig, JobHandler, RunData, g
 from pyxxl.error import JobDuplicateError, JobNotFoundError, JobParamsError
-from pyxxl.executor import CallbackRequest, Executor, JobHandler
-from pyxxl.schema import RunData
 from pyxxl.tests.conftest import GLOBAL_CONFIG
 from pyxxl.tests.utils import MokeXXL
+
+executorBlockStrategy = ExecutorBlockStrategy
 
 job_handler = JobHandler()
 TASK_SLEEP_SECONDS = 2
@@ -32,6 +31,18 @@ def pytest_executor_sync():
 @job_handler.register
 async def pytest_executor_error():
     assert 1 == 2
+
+
+@job_handler.register_process(name="pytest_executor_process")
+def pytest_executor_process() -> str:
+    return f"process:{g.xxl_run_data.executorParams}"
+
+
+@job_handler.register_process(name="pytest_executor_process_blocking")
+def pytest_executor_process_blocking() -> str:
+    while not g.cancel_event.is_set():
+        time.sleep(0.2)
+    return "process-stopped"
 
 
 HANDLER_NAMES = [
@@ -89,8 +100,7 @@ async def test_runner_callback(executor: Executor, handler_name: str):
 
 @pytest.mark.asyncio
 async def test_runner_callback_retry(executor: Executor, job_id: int, log_id: int):
-    # Callback delivery should be retried out of band and eventually succeed once
-    # admin connectivity comes back.
+    # callback 应在后台重试，并在 admin 恢复后最终成功。
     executor.reset_handler(job_handler)
     executor.xxl_client.clear_result()
     executor.callback_manager.retry_interval = 0.3
@@ -116,8 +126,7 @@ async def test_runner_callback_retry(executor: Executor, job_id: int, log_id: in
 
 @pytest.mark.asyncio
 async def test_runner_callback_replay_from_persisted_file(tmp_path: Path, log_id: int):
-    # Persisted callback records must survive process restart, mirroring Java's
-    # callback compensation behavior.
+    # 持久化 callback 记录必须能跨进程重启恢复，对齐 Java 的补偿语义。
     config = ExecutorConfig(**GLOBAL_CONFIG, log_local_dir=tmp_path.as_posix())
     callback_store = tmp_path.joinpath(".callback_failures")
 
@@ -191,8 +200,7 @@ async def test_runner_cancel_include_queue(
 
 @pytest.mark.asyncio
 async def test_runner_shutdown_include_queue_callback(executor: Executor, job_id: int, log_id_iter: Iterator[int]):
-    # Shutdown should close the state loop: both running and queued triggers need
-    # a terminal callback instead of being silently dropped.
+    # shutdown 要把状态机彻底收口：运行中和排队中的任务都必须收到终态 callback。
     executor.reset_handler(job_handler)
     executor.xxl_client.clear_result()
     running_log_id, queue_log_id = next(log_id_iter), next(log_id_iter)
@@ -234,7 +242,7 @@ async def test_runner_SERIAL_EXECUTION(executor: Executor, job_id: int, handler_
     assert executor.queue.get(job_id).qsize() == 0
     assert executor.xxl_client.callback_result.get(log_id) == 200
 
-    # max_queue_length
+    # 队列长度达到上限后应拒绝继续入队
     for _ in range(executor.config.task_queue_length + 1):
         await executor.run_job(RunData(logId=next(log_id_iter), **run_data))
 
@@ -246,7 +254,7 @@ async def test_runner_SERIAL_EXECUTION(executor: Executor, job_id: int, handler_
 
 @pytest.mark.asyncio
 async def test_runner_duplicate_log_id_dedup(executor: Executor, job_id: int, log_id: int):
-    # Same jobId + logId must be treated as the same execution and rejected.
+    # 同一个 jobId + logId 必须视为同一次执行并直接拒绝。
     executor.reset_handler(job_handler)
     executor.xxl_client.clear_result()
     run_data = RunData(
@@ -266,8 +274,69 @@ async def test_runner_duplicate_log_id_dedup(executor: Executor, job_id: int, lo
 
 
 @pytest.mark.asyncio
+async def test_runner_process_mode_success(executor: Executor, job_id: int, log_id: int):
+    executor.reset_handler(job_handler)
+    executor.xxl_client.clear_result()
+
+    await executor.run_job(
+        RunData(
+            logId=log_id,
+            jobId=job_id,
+            executorHandler="pytest_executor_process",
+            executorBlockStrategy=executorBlockStrategy.SERIAL_EXECUTION.value,
+            executorParams="process-ok",
+        )
+    )
+
+    await executor.graceful_close(10)
+    assert executor.xxl_client.callback_result.get(log_id) == 200
+    assert executor.xxl_client.callback_messages.get(log_id) == "process:process-ok"
+
+
+@pytest.mark.asyncio
+async def test_runner_process_mode_timeout(executor: Executor, job_id: int, log_id: int):
+    executor.reset_handler(job_handler)
+    executor.xxl_client.clear_result()
+
+    await executor.run_job(
+        RunData(
+            logId=log_id,
+            jobId=job_id,
+            executorHandler="pytest_executor_process_blocking",
+            executorBlockStrategy=executorBlockStrategy.SERIAL_EXECUTION.value,
+            executorTimeout=1,
+        )
+    )
+
+    await executor.graceful_close(10)
+    assert executor.xxl_client.callback_result.get(log_id) == 500
+    assert executor.xxl_client.callback_messages.get(log_id) == "TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_runner_process_mode_cancel(executor: Executor, job_id: int, log_id: int):
+    executor.reset_handler(job_handler)
+    executor.xxl_client.clear_result()
+
+    await executor.run_job(
+        RunData(
+            logId=log_id,
+            jobId=job_id,
+            executorHandler="pytest_executor_process_blocking",
+            executorBlockStrategy=executorBlockStrategy.SERIAL_EXECUTION.value,
+        )
+    )
+    await asyncio.sleep(0.2)
+
+    await executor.cancel_job(job_id, include_queue=False)
+    await executor.graceful_close(10)
+    assert executor.xxl_client.callback_result.get(log_id) == 500
+    assert "scheduling center kill job." in executor.xxl_client.callback_messages.get(log_id)
+
+
+@pytest.mark.asyncio
 async def test_is_running_or_has_queue(executor: Executor, job_id: int, log_id: int):
-    # idleBeat/BUSYOVER semantics are queue-aware, not only running-task aware.
+    # idleBeat/BUSYOVER 语义必须感知队列，而不只是感知运行中任务。
     executor.reset_handler(job_handler)
     queued = RunData(
         logId=log_id,
@@ -323,8 +392,7 @@ async def test_runner_COVER_EARLY(executor: Executor, job_id: int, handler_name:
 
 @pytest.mark.asyncio
 async def test_runner_cover_early_replaces_queue(executor: Executor, job_id: int, log_id_iter: Iterator[int]):
-    # COVER_EARLY should cancel the current run, discard queued work, and only
-    # keep the latest trigger as the replacement.
+    # COVER_EARLY 应取消当前运行、清空排队任务，并只保留最后一次触发作为替换项。
     executor.reset_handler(job_handler)
     executor.xxl_client.clear_result()
     running_log_id, queued_log_id, cover_log_id = [next(log_id_iter) for _ in range(3)]
@@ -364,7 +432,7 @@ async def test_runner_cover_early_replaces_queue(executor: Executor, job_id: int
 
 @pytest.mark.asyncio
 async def test_runner_cover_early_only_latest_runs(executor: Executor, job_id: int, log_id_iter: Iterator[int]):
-    # Multiple COVER_EARLY triggers should collapse into one final execution.
+    # 多次 COVER_EARLY 触发最终应折叠成最后一次执行。
     executor.reset_handler(job_handler)
     executor.xxl_client.clear_result()
     first_log_id, middle_log_id, last_log_id = [next(log_id_iter) for _ in range(3)]
@@ -421,8 +489,6 @@ async def test_runner_OTHER(executor: Executor, job_id: int, handler_name: str, 
 
 @pytest.mark.asyncio
 async def test_sync_timeout(executor: Executor, job_id: int, log_id: int):
-    from pyxxl.ctx import g
-
     sync_handler = JobHandler()
 
     @sync_handler.register(name="pytest_executor_sync")
@@ -446,7 +512,7 @@ async def test_sync_timeout(executor: Executor, job_id: int, log_id: int):
 
 @pytest.mark.asyncio
 async def test_many_jobs_running(executor: Executor, job_id: int, log_id_iter: Iterator[int]):
-    """Different jobIds should schedule independently under per-job locks."""
+    """不同 jobId 应在各自的锁内独立调度。"""
     executor.reset_handler(job_handler)
     executor.xxl_client.clear_result()
 

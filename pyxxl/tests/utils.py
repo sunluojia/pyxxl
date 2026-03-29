@@ -2,9 +2,8 @@ import os
 from typing import Any, Dict, Optional
 
 from pyxxl.error import XXLClientError
-from pyxxl.main import PyxxlRunner
+from pyxxl import JsonType, PyxxlRunner, Response, XXL
 from pyxxl.utils import try_import
-from pyxxl.xxl_client import XXL, JsonType, Response
 
 
 class MokeXXL(XXL):
@@ -41,9 +40,27 @@ class MokeXXL(XXL):
 
 
 class MokePyxxlRunner(PyxxlRunner):
-    def _get_xxl_clint(self) -> MokeXXL:
+    def _get_xxl_client(self) -> MokeXXL:
         return MokeXXL(self.config.admin_baseurls, token=self.config.access_token)
 
 
 REDIS_TEST_URI = os.environ.get("REDIS_TEST_URI", "redis://localhost")
 INSTALL_REDIS = bool(try_import("redis"))
+
+
+def _check_redis_server() -> bool:
+    if not INSTALL_REDIS:
+        return False
+
+    redis = try_import("redis")
+    assert redis is not None
+    try:
+        client = redis.Redis.from_url(REDIS_TEST_URI)
+        client.ping()
+        return True
+    except redis.RedisError:
+        return False
+
+
+REDIS_SERVER_AVAILABLE = _check_redis_server()
+ENABLE_REDIS_TESTS = INSTALL_REDIS and REDIS_SERVER_AVAILABLE

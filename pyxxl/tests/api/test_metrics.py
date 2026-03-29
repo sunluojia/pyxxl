@@ -27,7 +27,7 @@ async def test_metrics(cli: TestClient):
 @pytest.mark.asyncio
 @pytest.mark.skipif(not try_import("prometheus_client"), reason="不存在prometheus_client")
 async def test_metrics_counters(aiohttp_client) -> None:
-    # The Prometheus wrapper must chain user execution outcomes into counters.
+    # Prometheus 包装层必须把用户任务结果正确累计到指标里。
     config = ExecutorConfig(**GLOBAL_CONFIG)
     runner = MokePyxxlRunner(config)
 

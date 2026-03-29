@@ -23,7 +23,7 @@ MAX_LOG_TAIL_LINES = 1000
 
 
 class DiskLog(LogBase):
-    """Disk-backed task log storage used by the executor /log endpoint."""
+    """基于磁盘文件的任务日志后端。"""
 
     def __init__(
         self,
@@ -56,10 +56,9 @@ class DiskLog(LogBase):
         return logger
 
     async def get_logs(self, request: LogRequest, *, key: Optional[str] = None) -> LogResponse:
-        # Keep line-based pagination compatible with xxl-job-admin even though it
-        # is less efficient than offset-based reads for very large files.
+        # 按行分页虽然不如按偏移读取高效，但能与 xxl-job-admin 的日志协议保持一致。
         logs = ""
-        to_line_num = request["fromLineNum"]  # start with 1
+        to_line_num = request["fromLineNum"]  # 日志行号从 1 开始
         is_end = False
         key = key or self.key(request["logId"])
         try:
@@ -98,7 +97,7 @@ class DiskLog(LogBase):
         for i, p in enumerate(del_list, 1):
             if i % batch == 0:
                 self.executor_logger.debug("Delete expired logs step: %s", i)
-                await asyncio.sleep(0.01)  # release CPU for other tasks
+                await asyncio.sleep(0.01)  # 主动让出 CPU，避免长时间阻塞事件循环
             p.unlink(missing_ok=True)
 
         if del_list:
@@ -116,18 +115,19 @@ class DiskLog(LogBase):
                 if ctime < expire_timestamp:
                     del_list.append(sub_path)
             except (OSError, FileNotFoundError) as e:
-                # 文件可能在扫描过程中被删除
+                # 文件可能在扫描过程中被其他协程或进程删除。
                 self.executor_logger.debug(f"Skip file {sub_path}: {e}")
                 continue
         return del_list
 
     @asynccontextmanager
     async def mock_write(self, *lines: Any) -> AsyncGenerator[str, None]:
-        async with aiofiles.tempfile.NamedTemporaryFile() as f:
-            await f.writelines(lines)
-            await f.flush()
-            await f.seek(0)
-            yield str(f.name)
+        async with aiofiles.tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir).joinpath("mock.log")
+            async with aiofiles.open(temp_path, mode="wb") as f:
+                await f.writelines(lines)
+                await f.flush()
+            yield str(temp_path)
 
     @asynccontextmanager
     async def mock_logger(self, _log_id: int) -> AsyncGenerator[LogBase, None]:
@@ -136,7 +136,7 @@ class DiskLog(LogBase):
             yield handler
 
     def after_running(self, logger: logging.Logger) -> None:
-        # Keep stdout handlers alive; only close the per-task file handles.
+        # 标准输出 handler 继续复用，只关闭本次任务生成的文件句柄。
         file_handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
         for fh in file_handlers:
             logger.debug("close file log object: {}.".format(fh))

@@ -4,20 +4,7 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class RunData:
-    """
-    调度器传入的所有参数，执行函数通过g来获取这些参数
-
-    !!! example
-
-        ```python
-        from pyxxl.ctx import g
-
-        @xxxxx
-        async def test():
-            print(g.xxl_run_data.logId)
-        ```
-
-    """
+    """调度中心传入执行器的任务载荷。"""
 
     jobId: int
     logId: int
@@ -35,7 +22,7 @@ class RunData:
 
     @classmethod
     def from_dict(cls, data: dict) -> "RunData":
-        # Ignore unknown keys so the executor tolerates minor payload additions
-        # across xxl-job versions without failing deserialization.
-        class_fields = {f.name for f in fields(cls)}
-        return RunData(**{k: v for k, v in data.items() if k in class_fields})
+        """反序列化调度请求，并忽略不同版本 admin 多出来的字段。"""
+
+        class_fields = {field.name for field in fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in class_fields})

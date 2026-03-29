@@ -3,8 +3,7 @@ import time
 
 import pytest
 
-from pyxxl.ctx import g
-from pyxxl.executor import HandlerInfo
+from pyxxl import HandlerInfo, g
 
 
 @pytest.mark.asyncio
@@ -50,7 +49,7 @@ async def test_sync_timeout_error(event_loop):
     r = []
 
     def _handler():
-        while len(r) < 10:  # 防止测试线程卡死
+        while len(r) < 10:  # 防止测试线程无限阻塞
             time.sleep(0.5)
             r.append(1)
 

@@ -2,12 +2,12 @@ import pytest
 from aiohttp import web
 from pytest_aiohttp.plugin import AiohttpClient
 
-from pyxxl.xxl_client import XXL
+from pyxxl import XXL
 
 
 @pytest.mark.asyncio
 async def test_param_admin_url():
-    # Accept the admin URL variants users commonly paste into config.
+    # 兼容用户常见的 admin 地址填写方式。
     clients = [
         XXL("http://localhost:8080/xxl-job-admin/api/"),
         XXL("https://localhost:8080/xxl-job-admin/api/"),
@@ -42,18 +42,18 @@ async def test_client(aiohttp_client: AiohttpClient) -> None:
     app.router.add_post("/xxl-job-admin/api/callback", moke_callback_api)
     session = await aiohttp_client(app)
     xxl_client = XXL("http://localhost:8080/xxl-job-admin/api/", session=session)
-    # registry
+    # 注册执行器
     assert await xxl_client.registry("key", "value")
     assert not (await xxl_client.registry("server_test", "value"))
     assert not (await xxl_client.registry("status_test", "value"))
-    # callback
+    # 回调执行结果
     await xxl_client.callback(123, 123123123)
     await xxl_client.close()
 
 
 @pytest.mark.asyncio
 async def test_client_multi_admin_failover(aiohttp_client: AiohttpClient, unused_tcp_port_factory) -> None:
-    # Requests should fail over in order and stop at the first reachable admin.
+    # 多 admin 地址应按顺序故障转移，并在找到可用节点后立即停止。
     calls = []
 
     async def ok_registry_api(request: web.Request):

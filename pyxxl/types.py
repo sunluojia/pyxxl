@@ -16,4 +16,4 @@ class LogResponse(TypedDict):
 class LogRequest(TypedDict):
     logDateTim: int
     logId: int
-    fromLineNum: int  # min 1
+    fromLineNum: int  # 最小值为 1

@@ -1,9 +1,6 @@
 import pytest
 
-from pyxxl.ctx import g
-from pyxxl.enum import executorBlockStrategy
-from pyxxl.executor import Executor
-from pyxxl.schema import RunData
+from pyxxl import Executor, ExecutorBlockStrategy, RunData, g
 
 
 @pytest.mark.asyncio
@@ -27,7 +24,7 @@ async def test_runner_callback(executor: Executor):
                 logId=1,
                 jobId=11,
                 executorHandler=handler,
-                executorBlockStrategy=executorBlockStrategy.SERIAL_EXECUTION.value,
+                executorBlockStrategy=ExecutorBlockStrategy.SERIAL_EXECUTION.value,
             )
         )
         await executor.run_job(data)

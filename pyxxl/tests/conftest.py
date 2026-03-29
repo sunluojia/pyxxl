@@ -7,9 +7,8 @@ import pytest_asyncio
 from aiohttp.web import Application
 from pytest_aiohttp.plugin import AiohttpClient, TestClient
 
-from pyxxl import ExecutorConfig
-from pyxxl.executor import Executor
-from pyxxl.tests.utils import INSTALL_REDIS, REDIS_TEST_URI, MokePyxxlRunner, MokeXXL
+from pyxxl import Executor, ExecutorConfig
+from pyxxl.tests.utils import ENABLE_REDIS_TESTS, REDIS_TEST_URI, MokePyxxlRunner, MokeXXL
 
 GLOBAL_CONFIG: Any = dict(
     xxl_admin_baseurl="http://localhost:8080/xxl-job-admin/api/",
@@ -36,7 +35,7 @@ LOG_ID = _generate_increment_id(1000)
 
 @pytest.fixture(scope="session")
 def event_loop() -> Generator:
-    """Create an instance of the default event loop for each test case."""
+    """为测试会话创建默认事件循环。"""
     loop = asyncio.get_event_loop_policy().new_event_loop()
     yield loop
     loop.close()
@@ -48,7 +47,7 @@ def event_loop() -> Generator:
         ExecutorConfig(**GLOBAL_CONFIG),
         pytest.param(
             ExecutorConfig(**GLOBAL_CONFIG, log_target="redis", log_redis_uri=REDIS_TEST_URI),
-            marks=pytest.mark.skipif(not INSTALL_REDIS, reason="no redis package."),
+            marks=pytest.mark.skipif(not ENABLE_REDIS_TESTS, reason="redis unavailable."),
         ),
     ],
     ids=["disk", "redis"],
@@ -88,7 +87,7 @@ def job_id() -> int:
 
 @pytest.fixture(scope="session")
 def log_id_iter() -> Generator[int, None, None]:
-    """Generate log_id for each test case."""
+    """为测试生成连续的 log_id。"""
     return LOG_ID
 
 

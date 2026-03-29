@@ -3,7 +3,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional, Union
 
-from pyxxl.ctx import g
+from pyxxl.context import g
 from pyxxl.log import executor_logger
 from pyxxl.types import LogRequest, LogResponse
 from pyxxl.utils import try_import
@@ -22,7 +22,7 @@ KEY_PREFIX = "pyxxl:log:{app}:{log_id}"
 
 
 class RedisHandler(logging.Handler):
-    """Redis list-backed log handler with bounded tail retention."""
+    """基于 Redis List 的任务日志 handler，并限制尾部保留行数。"""
 
     terminator = "\n"
 
@@ -45,7 +45,7 @@ class RedisHandler(logging.Handler):
         try:
             xxl_kwargs = g.try_get_run_data()
             record.logId = xxl_kwargs.logId if xxl_kwargs else "NotInTask"
-            # Use a pipeline so append/trim/expire stay consistent for one log write.
+            # 用 pipeline 保证一次日志写入时 append/trim/expire 尽量原子。
             p = self.rclient.pipeline()
             p.rpush(self.key, self.format(record) + self.terminator)
             p.ltrim(self.key, -self.max_lines, -1)
@@ -56,7 +56,7 @@ class RedisHandler(logging.Handler):
 
 
 class RedisLog(LogBase):
-    """Redis-backed task log storage for multi-instance or ephemeral executors."""
+    """基于 Redis 的任务日志后端，适合多实例或无本地磁盘场景。"""
 
     def __init__(
         self,
@@ -99,20 +99,37 @@ class RedisLog(LogBase):
 
     async def read_task_logs(self, log_id: int, *, key: Optional[str] = None) -> str:
         key = key or self.key(log_id)
-        # redis-py is synchronous, so this remains a P1 optimization target.
-        return "".join(i.decode() for i in self.rclient.lrange(key, 0, -1))
+        # redis-py 仍是同步客户端，这里先保持现状，后续再做异步优化。
+        try:
+            return "".join(i.decode() for i in self.rclient.lrange(key, 0, -1))
+        except redis.RedisError as err:  # pragma: no cover
+            self.executor_logger.warning("Read redis task logs failed key=%s error=%s", key, err)
+            return ""
 
     async def get_logs(self, request: LogRequest, *, key: Optional[str] = None) -> LogResponse:
         key = key or self.key(request["logId"])
         from_line = request["fromLineNum"] - 1
         to_line = request["fromLineNum"] - 1 + self.log_tail_lines
-        llen = self.rclient.llen(key)
+        try:
+            llen = self.rclient.llen(key)
+        except redis.RedisError as err:  # pragma: no cover
+            self.executor_logger.warning("Read redis logs failed key=%s error=%s", key, err)
+            return LogResponse(
+                fromLineNum=request["fromLineNum"],
+                toLineNum=request["fromLineNum"],
+                logContent="No such logid logs.",
+                isEnd=True,
+            )
         if from_line >= llen:
             logs = "No such logid logs." if llen == 0 else ""
             to_line_num = request["fromLineNum"]
         else:
-            # Redis LRANGE end index is inclusive, unlike Python slices.
-            logs = "".join(i.decode() for i in self.rclient.lrange(key, from_line, to_line - 1))
+            # Redis LRANGE 的结束下标是闭区间，和 Python 切片不同。
+            try:
+                logs = "".join(i.decode() for i in self.rclient.lrange(key, from_line, to_line - 1))
+            except redis.RedisError as err:  # pragma: no cover
+                self.executor_logger.warning("Read redis log slice failed key=%s error=%s", key, err)
+                logs = ""
             to_line_num = to_line
 
         return LogResponse(

@@ -6,7 +6,7 @@ import aiofiles
 import pytest
 
 from pyxxl.logger import DiskLog, LogBase, RedisLog
-from pyxxl.tests.utils import INSTALL_REDIS, REDIS_TEST_URI
+from pyxxl.tests.utils import ENABLE_REDIS_TESTS, REDIS_TEST_URI
 from pyxxl.types import LogRequest, LogResponse
 from pyxxl.utils import try_import
 
@@ -23,7 +23,7 @@ else:
         lambda: DiskLog("", log_tail_lines=20),
         pytest.param(
             lambda: RedisLog("pyxxl-test", REDIS_TEST_URI, log_tail_lines=20),
-            marks=pytest.mark.skipif(not INSTALL_REDIS, reason="no redis package."),
+            marks=pytest.mark.skipif(not ENABLE_REDIS_TESTS, reason="redis unavailable."),
         ),
     ],
     ids=["disk", "redis"],
@@ -74,11 +74,11 @@ async def test_read_file(get_log: Callable[..., LogBase], req, resp):
         lambda: DiskLog("", log_tail_lines=20),
         pytest.param(
             lambda: RedisLog("pyxxl-test", REDIS_TEST_URI, log_tail_lines=20),
-            marks=pytest.mark.skipif(not INSTALL_REDIS, reason="no redis package."),
+            marks=pytest.mark.skipif(not ENABLE_REDIS_TESTS, reason="redis unavailable."),
         ),
         pytest.param(
             lambda: RedisLog("pyxxl-test", redis.ConnectionPool.from_url(REDIS_TEST_URI), log_tail_lines=20),
-            marks=pytest.mark.skipif(not INSTALL_REDIS, reason="no redis package."),
+            marks=pytest.mark.skipif(not ENABLE_REDIS_TESTS, reason="redis unavailable."),
         ),
     ],
     ids=["disk", "redis", "redis-pool"],
@@ -98,7 +98,7 @@ async def test_disk_logger(get_log: Callable[..., LogBase]):
         read_data = await mock_log.read_task_logs(log_id)
         for b in ["test error", "test warning", "ERROR", "WARNING"]:
             assert b in read_data
-    # test file not found
+    # 文件不存在时应返回空日志提示
     assert (
         "No such logid logs"
         in (

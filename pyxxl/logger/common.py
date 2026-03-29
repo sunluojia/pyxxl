@@ -3,7 +3,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, AsyncContextManager, Optional
 
-from pyxxl.ctx import g
+from pyxxl.context import g
 from pyxxl.types import LogRequest, LogResponse
 
 MAX_LOG_TAIL_LINES = 1000
@@ -26,7 +26,7 @@ class LogBase(ABC):
 
     @abstractmethod
     async def read_task_logs(self, log_id: int, *, key: Optional[str] = None) -> str:
-        """一次性读取某个log id的所有日志,主要用于单测"""
+        """一次性读取某个 log id 的所有日志，主要用于单测。"""
         ...
 
     @abstractmethod
@@ -36,14 +36,12 @@ class LogBase(ABC):
     def mock_logger(self, log_id: int) -> AsyncContextManager["LogBase"]: ...
 
     async def expired_once(self) -> None:  # noqa: B027
-        """执行一次批量过期操作,如果是redis啥的自带过期就无需实现此方法"""
+        """执行一次批量过期操作；如果后端自带过期机制，可以不实现。"""
         pass
 
     async def expired_loop(self, seconds: int = 3600) -> None:
-        """
-        Args:
-            seconds (int, optional): one loop seconds. Defaults to 3600.
-        """
+        """定时执行日志过期清理。"""
+
         self.executor_logger.debug("start expired_loop...")
         try:
             while True:

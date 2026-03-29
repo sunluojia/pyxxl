@@ -5,8 +5,7 @@ import pytest
 from aiohttp.test_utils import TestClient
 from pytest_aiohttp.plugin import AiohttpClient
 
-from pyxxl import ExecutorConfig
-from pyxxl.schema import RunData
+from pyxxl import ExecutorConfig, RunData
 from pyxxl.tests.conftest import GLOBAL_CONFIG
 from pyxxl.tests.utils import MokePyxxlRunner
 
@@ -48,7 +47,7 @@ async def test_run(cli: TestClient):
     resp, _ = await send_demoJobHandler(cli, executorBlockStrategy="DISCARD_LATER", jobId=100)
     assert resp.status == 200
     assert await resp.json() == {"code": 200, "msg": "Running"}
-    # error
+    # 冲突时应返回错误
     resp, _ = await send_demoJobHandler(cli, executorBlockStrategy="DISCARD_LATER", jobId=100)
     assert resp.status == 200
     response_dict = await resp.json()
@@ -87,7 +86,7 @@ async def test_idle_beat(cli: TestClient):
 
     executor = cli.server.app["pyxxl_state"].executor
     queue_only_job_id = 333
-    # Queue-only state should still be reported as busy to match Java idleBeat.
+    # 只有排队、没有运行中任务时，也应该按照 Java 的 idleBeat 语义返回 busy。
     await executor.get_queue(queue_only_job_id).put(
         RunData(
             jobId=queue_only_job_id,
@@ -112,8 +111,7 @@ async def test_kill(cli: TestClient):
 
 @pytest.mark.asyncio
 async def test_run_duplicate_log_id(cli: TestClient):
-    # The executor endpoint should reject duplicate triggers before a second run
-    # is created for the same logId.
+    # 同一个 logId 的重复触发必须在创建第二个运行实例之前就被拒绝。
     job_payload = {
         "jobId": 401,
         "executorHandler": "demoJobHandler",
@@ -183,8 +181,7 @@ async def test_log(cli: TestClient):
     ],
 )
 async def test_access_token_rejected(cli_with_token: TestClient, path: str, payload):
-    # Executor routes return XXL-style JSON failures instead of HTTP 401/403 so
-    # admin keeps its expected parsing behavior.
+    # token 校验失败也要返回 XXL 约定的 JSON，而不是 401/403。
     resp = await cli_with_token.post(path, json=payload)
     assert resp.status == 200
     assert await resp.json() == {"code": 500, "msg": "The access token is wrong."}
